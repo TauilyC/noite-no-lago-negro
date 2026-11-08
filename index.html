@@ -1,0 +1,1626 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>NOITE NO LAGO NEGRO — terror 8-bit</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000; outline: none; }
+</style>
+</head>
+<body>
+<canvas id="screen" width="256" height="240" tabindex="0"></canvas>
+
+<script>
+(() => {
+'use strict';
+
+/* ==========================================================================
+   NOITE NO LAGO NEGRO — survival horror 8-bit (estilo NES) em um único arquivo.
+
+   5 FASES, da mais fácil à mais difícil, cada uma com um cenário próprio:
+     1 Acampamento Pinheiro Negro   (fácil)      4 Sanatório Abandonado (difícil)
+     2 Cemitério da Colina          (normal)     5 A Mina Maldita       (pesadelo)
+     3 Pântano dos Sussurros        (médio)
+
+   Em cada fase: ache os FUSÍVEIS, ligue o GERADOR e use a SAÍDA.
+
+   Controles:  setas/WASD mover | Z ou ESPAÇO (segurar) procurar / usar
+               X ou SHIFT correr | F ou botão na tela: lanterna
+               P pausa | M som | ENTER confirma | ←/→ escolhe fase no título
+
+   Seções:  1 Config e fases   2 Fonte   3 Áudio   4 Entrada   5 Mapas
+            6 Caminhos (BFS)   7 Jogador   8 Vilões   9 Interações
+            10 Desenho         11 Laço principal
+   ========================================================================== */
+
+
+/* ========================= 1. CONFIG E FASES =============================== */
+const W = 256, H = 240, TS = 16;
+const MW = 48, MH = 45;                 // mapa em tiles (768 x 720 px)
+const STEP = 1000 / 60;
+const START_HP = 3;
+
+/**
+ * Parâmetros de cada fase. A dificuldade sobe por:
+ *  fuses (quantos fusíveis), killers (quantos vilões), kSpeed/kSight/kHear (velocidade,
+ *  visão e audição do vilão), drain (gasto da pilha), batt (pilhas no chão), hide (esconderijos).
+ */
+/* Modos de visao: NORMAL (como era), ESCURO, ESCURIDAO TOTAL (so a lanterna e as luzes do cenario iluminam).
+   mult = multiplicador de pontos. */
+const MODES = [
+  { name: 'NORMAL',          alpha: [0.80, 0.60, 0.40, 0.20], r0on: 26, r0off: 14, ls: 1.0, mult: 1,    desc: 'ESCURIDAO PADRAO' },
+  { name: 'ESCURO',          alpha: [0.93, 0.76, 0.52, 0.26], r0on: 24, r0off: 8,  ls: 0.9, mult: 1.25, desc: 'BEM MAIS ESCURO' },
+  { name: 'ESCURIDAO TOTAL', alpha: [1, 0.88, 0.62, 0.32],    r0on: 18, r0off: 5,  ls: 0.8, mult: 1.5,  desc: 'SO A LANTERNA ILUMINA' }
+];
+let mode = 0;
+const LAMPS = [1.0, 0.85, 0.7, 0.6, 0.45];   // densidade de luzes por fase
+const LEVELS = [
+  { name: 'ACAMPAMENTO PINHEIRO NEGRO', diff: 'FACIL', stars: 1, theme: 'forest', gen: 'outdoor', bottom: 'lake',
+    exit: 'boat', fuses: 3, killers: 1, kSpeed: 0.80, kSight: 0.85, kHear: 0.80, drain: 0.006, batt: 9, hide: 24,
+    density: 0.15, tip: 'APAGUE A LANTERNA E ESCONDA-SE NOS ARBUSTOS.', way: 'FUJA DE BARCO' },
+  { name: 'CEMITERIO DA COLINA', diff: 'NORMAL', stars: 2, theme: 'cemetery', gen: 'outdoor', bottom: 'fence',
+    exit: 'gate', fuses: 3, killers: 1, kSpeed: 0.95, kSight: 1.00, kHear: 1.00, drain: 0.008, batt: 8, hide: 18,
+    density: 0.13, tip: 'O PORTAO SO ABRE QUANDO A ENERGIA VOLTAR.', way: 'ABRA O PORTAO' },
+  { name: 'PANTANO DOS SUSSURROS', diff: 'MEDIO', stars: 3, theme: 'swamp', gen: 'outdoor', bottom: 'lake', mud: true,
+    exit: 'boat', fuses: 4, killers: 1, kSpeed: 1.05, kSight: 1.05, kHear: 1.05, drain: 0.009, batt: 7, hide: 16,
+    density: 0.13, tip: 'A LAMA TE DEIXA LENTO. DESVIE DELA!', way: 'FUJA DE BARCO' },
+  { name: 'SANATORIO ABANDONADO', diff: 'DIFICIL', stars: 4, theme: 'hospital', gen: 'hospital',
+    exit: 'door', fuses: 4, killers: 1, kSpeed: 1.20, kSight: 1.15, kHear: 1.15, drain: 0.010, batt: 6, hide: 10,
+    tip: 'NOS CORREDORES NAO HA PARA ONDE FUGIR.', way: 'ABRA A PORTA DE SAIDA' },
+  { name: 'A MINA MALDITA', diff: 'PESADELO', stars: 5, theme: 'mine', gen: 'mine',
+    exit: 'lift', fuses: 5, killers: 2, kSpeed: 1.10, kSight: 1.15, kHear: 1.20, drain: 0.011, batt: 6, hide: 8,
+    tip: 'DOIS CEIFADORES. NAO CONFIE NO SILENCIO.', way: 'CHAME O ELEVADOR' }
+];
+
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+function resize() {
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  const k = s >= 1 ? Math.floor(s) : s;
+  canvas.style.width = (W * k) + 'px';
+  canvas.style.height = (H * k) + 'px';
+  ctx.imageSmoothingEnabled = false;
+}
+window.addEventListener('resize', resize);
+resize();
+
+const rnd = (n) => Math.floor(Math.random() * n);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const idx = (x, y) => y * MW + x;
+const inB = (x, y) => x >= 0 && y >= 0 && x < MW && y < MH;
+const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = rnd(i + 1); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+
+
+/* ============================ 2. FONTE PIXEL ============================== */
+const FONT = {
+  'A': '.###./#...#/#...#/#####/#...#/#...#/#...#', 'B': '####./#...#/#...#/####./#...#/#...#/####.',
+  'C': '.###./#...#/#..../#..../#..../#...#/.###.', 'D': '###../#..#./#...#/#...#/#...#/#..#./###..',
+  'E': '#####/#..../#..../####./#..../#..../#####', 'F': '#####/#..../#..../####./#..../#..../#....',
+  'G': '.###./#...#/#..../#.###/#...#/#...#/.###.', 'H': '#...#/#...#/#...#/#####/#...#/#...#/#...#',
+  'I': '.###./..#../..#../..#../..#../..#../.###.', 'J': '..###/...#./...#./...#./...#./#..#./.##..',
+  'K': '#...#/#..#./#.#../##.../#.#../#..#./#...#', 'L': '#..../#..../#..../#..../#..../#..../#####',
+  'M': '#...#/##.##/#.#.#/#.#.#/#...#/#...#/#...#', 'N': '#...#/##..#/#.#.#/#..##/#...#/#...#/#...#',
+  'O': '.###./#...#/#...#/#...#/#...#/#...#/.###.', 'P': '####./#...#/#...#/####./#..../#..../#....',
+  'Q': '.###./#...#/#...#/#...#/#.#.#/#..#./.##.#', 'R': '####./#...#/#...#/####./#.#../#..#./#...#',
+  'S': '.####/#..../#..../.###./....#/....#/####.', 'T': '#####/..#../..#../..#../..#../..#../..#..',
+  'U': '#...#/#...#/#...#/#...#/#...#/#...#/.###.', 'V': '#...#/#...#/#...#/#...#/#...#/.#.#./..#..',
+  'W': '#...#/#...#/#...#/#.#.#/#.#.#/##.##/#...#', 'X': '#...#/#...#/.#.#./..#../.#.#./#...#/#...#',
+  'Y': '#...#/#...#/.#.#./..#../..#../..#../..#..', 'Z': '#####/....#/...#./..#../.#.../#..../#####',
+  '0': '.###./#...#/#..##/#.#.#/##..#/#...#/.###.', '1': '..#../.##../..#../..#../..#../..#../.###.',
+  '2': '.###./#...#/....#/...#./..#../.#.../#####', '3': '####./....#/....#/.###./....#/....#/####.',
+  '4': '...#./..##./.#.#./#..#./#####/...#./...#.', '5': '#####/#..../####./....#/....#/#...#/.###.',
+  '6': '.###./#..../#..../####./#...#/#...#/.###.', '7': '#####/....#/...#./..#../.#.../.#.../.#...',
+  '8': '.###./#...#/#...#/.###./#...#/#...#/.###.', '9': '.###./#...#/#...#/.####/....#/....#/.###.',
+  ' ': '...../...../...../...../...../...../.....', '-': '...../...../...../#####/...../...../.....',
+  ':': '...../..#../..#../...../..#../..#../.....', '!': '..#../..#../..#../..#../..#../...../..#..',
+  '.': '...../...../...../...../...../.##../.##..', ',': '...../...../...../...../.##../..#../.#...',
+  '?': '.###./#...#/....#/...#./..#../...../..#..', '/': '....#/....#/...#./..#../.#.../#..../#....',
+  '=': '...../...../#####/...../#####/...../.....', '+': '...../..#../..#../#####/..#../..#../.....',
+  '<': '...#./..#../.#.../#..../.#.../..#../...#.', '>': '.#.../..#../...#./....#/...#./..#../.#...'
+};
+const glyphCache = {};
+function glyph(ch, col) {
+  const key = ch + col;
+  if (glyphCache[key]) return glyphCache[key];
+  const rows = FONT[ch];
+  if (!rows) return null;
+  const c = document.createElement('canvas');
+  c.width = 5; c.height = 7;
+  const g = c.getContext('2d');
+  g.fillStyle = col;
+  rows.split('/').forEach((row, y) => { for (let x = 0; x < 5; x++) if (row[x] === '#') g.fillRect(x, y, 1, 1); });
+  return (glyphCache[key] = c);
+}
+function drawText(str, x, y, col = '#FCFCFC', s = 1, shadow = true) {
+  str = String(str).toUpperCase();
+  for (let i = 0; i < str.length; i++) {
+    const g = glyph(str[i], col);
+    if (!g) continue;
+    const gx = Math.round(x + i * 6 * s), gy = Math.round(y);
+    if (shadow) ctx.drawImage(glyph(str[i], '#000000'), gx + s, gy + s, 5 * s, 7 * s);
+    ctx.drawImage(g, gx, gy, 5 * s, 7 * s);
+  }
+}
+const textW = (str, s = 1) => String(str).length * 6 * s - s;
+const drawTextC = (str, y, col, s = 1, sh = true) => drawText(str, Math.round((W - textW(str, s)) / 2), y, col, s, sh);
+const drawTextR = (str, xr, y, col, s = 1, sh = true) => drawText(str, Math.round(xr - textW(str, s)), y, col, s, sh);
+const rect = (col, x, y, w, h) => { ctx.fillStyle = col; ctx.fillRect(Math.round(x), Math.round(y), w, h); };
+
+
+/* ============================== 3. ÁUDIO ================================== */
+const audio = {
+  ctx: null, master: null, muted: false, noiseBuf: null, pulse25: null,
+  init() {
+    if (this.ctx) { if (this.ctx.state === 'suspended' && !paused) this.ctx.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = this.muted ? 0 : 0.9;
+    this.master.connect(this.ctx.destination);
+    const N = 32, re = new Float32Array(N), im = new Float32Array(N);
+    for (let n = 1; n < N; n++) im[n] = (2 / (n * Math.PI)) * Math.sin(n * Math.PI * 0.25);
+    this.pulse25 = this.ctx.createPeriodicWave(re, im);
+    const len = this.ctx.sampleRate;
+    this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = this.noiseBuf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  },
+  setMuted(m) { this.muted = m; if (this.master) this.master.gain.value = m ? 0 : 0.9; },
+  now() { return this.ctx ? this.ctx.currentTime : 0; },
+  tone(f, dur, o = {}) {
+    if (!this.ctx) return;
+    const { type = 'sq', vol = 0.1, slide = null } = o;
+    const t = o.at !== undefined ? o.at : this.ctx.currentTime;
+    const osc = this.ctx.createOscillator(), g = this.ctx.createGain();
+    if (type === 'p25') osc.setPeriodicWave(this.pulse25);
+    else osc.type = type === 'tri' ? 'triangle' : type === 'saw' ? 'sawtooth' : 'square';
+    osc.frequency.setValueAtTime(f, t);
+    if (slide) osc.frequency.exponentialRampToValueAtTime(slide, t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(g); g.connect(this.master);
+    osc.start(t); osc.stop(t + dur + 0.03);
+  },
+  noise(dur, vol, at) {
+    if (!this.ctx) return;
+    const t = at !== undefined ? at : this.ctx.currentTime;
+    const s = this.ctx.createBufferSource(), g = this.ctx.createGain();
+    s.buffer = this.noiseBuf;
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(g); g.connect(this.master);
+    s.start(t); s.stop(t + dur + 0.02);
+  },
+  seq(notes, o = {}) {
+    if (!this.ctx) return;
+    let t = this.ctx.currentTime;
+    for (const [f, d] of notes) { this.tone(f, d * 1.1, Object.assign({}, o, { at: t })); t += d; }
+  }
+};
+
+const sfx = {
+  pickup()  { audio.seq([[880, .06], [1175, .06], [1568, .14]], { vol: 0.08 }); },
+  fuse()    { audio.seq([[523, .08], [784, .08], [1047, .08], [1568, .22]], { vol: 0.09 }); },
+  empty()   { audio.tone(160, 0.18, { type: 'tri', vol: 0.2, slide: 110 }); },
+  creak()   { audio.tone(140, 0.12, { type: 'saw', vol: 0.04, slide: 190 }); },
+  spot()    { audio.tone(880, 0.45, { vol: 0.09 }); audio.tone(932, 0.45, { vol: 0.09 }); audio.noise(0.25, 0.12); },
+  hurt()    { audio.noise(0.4, 0.3); audio.tone(220, 0.6, { type: 'saw', vol: 0.12, slide: 40 }); },
+  power()   { audio.seq([[110, .12], [165, .12], [220, .12], [330, .12], [440, .4]], { type: 'tri', vol: 0.25 }); },
+  click()   { audio.tone(1800, 0.02, { vol: 0.05 }); },
+  start()   { audio.seq([[196, .25], [185, .25], [196, .5]], { type: 'tri', vol: 0.25 }); },
+  drip()    { audio.tone(1300 + rnd(500), 0.07, { vol: 0.02, slide: 650 }); },
+  clear()   { audio.seq([[523, .12], [659, .12], [784, .12], [1047, .12], [784, .1], [1047, .1], [1319, .5]], { vol: 0.09 }); },
+  win()     { audio.seq([[392, .14], [523, .14], [659, .14], [784, .14], [1047, .3], [784, .14], [1047, .14], [1319, .7]], { vol: 0.1 }); },
+  lose()    { audio.seq([[392, .25], [349, .25], [330, .25], [196, .9]], { type: 'tri', vol: 0.3 }); }
+};
+
+/** Trilha dinâmica: drone grave (mais grave a cada fase) + sons do cenário + batimentos conforme o medo. */
+let fear = 0;          // 0..1, vem da distância do vilão mais próximo
+let chasing = false;   // algum vilão está te perseguindo?
+const ambient = {
+  timer: null, nextBeat: 0, nextDrone: 0, nextChirp: 0, nextPulse: 0, pulseStep: 0, nextWind: 0, droneF: 55, theme: 'forest',
+  start(theme, droneF) {
+    if (!audio.ctx) return;
+    this.stop();
+    this.theme = theme; this.droneF = droneF;
+    const t = audio.now() + 0.05;
+    this.nextBeat = this.nextDrone = this.nextChirp = this.nextPulse = this.nextWind = t;
+    this.timer = setInterval(() => this.tick(), 30);
+  },
+  stop() { if (this.timer) { clearInterval(this.timer); this.timer = null; } },
+  tick() {
+    if (!audio.ctx) return;
+    const now = audio.now(), ahead = now + 0.2;
+    while (this.nextDrone < ahead) {                       // drone contínuo
+      audio.tone(this.droneF, 2.3, { type: 'tri', vol: 0.10 + fear * 0.08, at: this.nextDrone });
+      audio.tone(this.droneF * 1.06, 2.3, { type: 'tri', vol: 0.05, at: this.nextDrone });
+      this.nextDrone += 2.0;
+    }
+    while (this.nextChirp < ahead) {                       // grilos (fora) / pingos (dentro)
+      const t = this.nextChirp, out = this.theme === 'forest' || this.theme === 'swamp';
+      if (out) for (let i = 0; i < 3; i++) audio.tone(this.theme === 'swamp' ? 3000 : 4200, 0.03, { vol: 0.008, at: t + i * 0.06 });
+      else if (this.theme === 'hospital' || this.theme === 'mine') audio.tone(1300 + rnd(500), 0.07, { vol: 0.02, slide: 650, at: t });
+      this.nextChirp += (out ? 0.9 : 1.6) + Math.random() * 2.2;
+    }
+    while (this.nextWind < ahead) {                        // vento (ou ruído de rocha/ventilação)
+      audio.noise(this.theme === 'mine' ? 1.8 : 1.2, this.theme === 'cemetery' ? 0.02 : 0.012, this.nextWind);
+      this.nextWind += 2.6 + Math.random() * 2;
+    }
+    while (fear > 0.05 && this.nextBeat < ahead) {         // batimento cardíaco
+      const t = this.nextBeat, v = 0.2 + fear * 0.25;
+      audio.tone(70, 0.1, { type: 'tri', vol: v, slide: 38, at: t });
+      audio.tone(62, 0.12, { type: 'tri', vol: v * 0.75, slide: 34, at: t + 0.15 });
+      this.nextBeat += 1.1 - fear * 0.72;
+    }
+    if (fear <= 0.05 && this.nextBeat < now) this.nextBeat = now;
+    while (chasing && this.nextPulse < ahead) {            // perseguição: trítono pulsante
+      const f = (this.pulseStep++ % 2) ? 233 : 330;
+      audio.tone(f, 0.09, { type: 'p25', vol: 0.05, at: this.nextPulse });
+      this.nextPulse += 0.13;
+    }
+    if (!chasing && this.nextPulse < now) this.nextPulse = now;
+  }
+};
+
+
+/* ============================== 4. ENTRADA ================================ */
+const keys = { left: false, right: false, up: false, down: false, act: false, run: false };
+const KEYMAP = {
+  ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right',
+  ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down',
+  KeyZ: 'act', Space: 'act', KeyX: 'run', ShiftLeft: 'run', ShiftRight: 'run'
+};
+window.addEventListener('keydown', (e) => {
+  audio.init();
+  const k = KEYMAP[e.code];
+  if (k) { e.preventDefault(); keys[k] = true; }
+  if (e.repeat) return;
+  if (state === 'title' && (k === 'left' || k === 'right')) {            // escolhe a fase inicial
+    startLevel = clamp(startLevel + (k === 'right' ? 1 : -1), 0, unlocked - 1);
+    sfx.click();
+    return;
+  }
+  if (state === 'title' && (k === 'up' || k === 'down')) {              // escolhe o modo de escuridao
+    mode = (mode + (k === 'down' ? 1 : MODES.length - 1)) % MODES.length;
+    saveProgress(); sfx.click();
+    return;
+  }
+  if (e.code === 'Enter' || k === 'act') onAction();
+  if (e.code === 'KeyF' && state === 'play' && !paused) toggleLight();
+  if (e.code === 'KeyP' || e.code === 'Escape') togglePause();
+  if (e.code === 'KeyM') audio.setMuted(!audio.muted);
+});
+window.addEventListener('keyup', (e) => { const k = KEYMAP[e.code]; if (k) { keys[k] = false; e.preventDefault(); } });
+function releaseKeys() { for (const k in keys) keys[k] = false; }
+window.addEventListener('blur', () => { releaseKeys(); autoPause(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) autoPause(); });
+
+// Botão da lanterna na tela (mouse ou toque) — mesma função da tecla F
+const LIGHT_BTN = { x: 196, y: 212, w: 56, h: 22 };
+canvas.addEventListener('pointerdown', (e) => {
+  audio.init();
+  const r = canvas.getBoundingClientRect();
+  const x = (e.clientX - r.left) / r.width * W, y = (e.clientY - r.top) / r.height * H;
+  if (state === 'play' && !paused && x >= LIGHT_BTN.x && x <= LIGHT_BTN.x + LIGHT_BTN.w && y >= LIGHT_BTN.y && y <= LIGHT_BTN.y + LIGHT_BTN.h) {
+    e.preventDefault(); toggleLight();
+  }
+});
+
+
+/* =============================== 5. MAPAS ================================= */
+// Tiles
+const T = { G: 0, TREE: 1, PATH: 2, WATER: 3, CABIN: 4, DOOR: 5, GEN: 6, DOCK: 7,
+            WALL: 8, FLOOR: 9, MUD: 10, PROP: 11, FURN: 12, GATE: 13, FENCE: 14 };
+//                G      TREE  PATH   WATER CABIN DOOR  GEN   DOCK   WALL  FLOOR  MUD    PROP  FURN  GATE  FENCE
+const SOLID = [false, true, false, true, true, true, true, false, true, false, false, true, true, true, true];
+
+let grid = new Uint8Array(MW * MH);
+let structs = [];       // locais de busca: {kind:'cabin'|'prop', ix,iy,r,item,searched,...}
+let propAt = new Map(); // idx do tile -> struct (armários/caixotes)
+let bushes = new Set(); // esconderijos (arbusto, junco, cortina, barril...)
+let pickups = [];       // pilhas no chão
+let walkList = [];      // tiles alcançáveis a partir do início
+let mapLights = [];     // luzes fixas {x,y,r}
+let gateTiles = [];     // tiles que abrem quando a energia volta
+const GEN = { tx: 26, ty: 19, x: 27 * TS, y: 20 * TS };
+const START = { x: 0, y: 0 };
+const APP = { tx: 0, ty: 0 };                 // tile de aproximação da saída (precisa ser alcançável)
+let EXIT = { x: 0, y: 0, w: 0, h: 0, style: 'boat' };
+LEVELS.forEach((l, i) => { l.lamps = LAMPS[i]; });
+let LV = LEVELS[0];
+
+const tileSolid = (tx, ty) => !inB(tx, ty) || SOLID[grid[idx(tx, ty)]];
+const walkable = (tx, ty) => inB(tx, ty) && !SOLID[grid[idx(tx, ty)]];
+function boxSolid(x, y, r) {
+  return tileSolid(Math.floor((x - r) / TS), Math.floor((y - r) / TS)) ||
+         tileSolid(Math.floor((x + r - 0.01) / TS), Math.floor((y - r) / TS)) ||
+         tileSolid(Math.floor((x - r) / TS), Math.floor((y + r - 0.01) / TS)) ||
+         tileSolid(Math.floor((x + r - 0.01) / TS), Math.floor((y + r - 0.01) / TS));
+}
+function tryMove(e, dx, dy) {
+  if (dx && !boxSolid(e.x + dx, e.y, e.r)) e.x += dx;
+  if (dy && !boxSolid(e.x, e.y + dy, e.r)) e.y += dy;
+}
+const tileAt = (x, y) => (inB(Math.floor(x / TS), Math.floor(y / TS)) ? grid[idx(Math.floor(x / TS), Math.floor(y / TS))] : T.G);
+
+function floodReach(sx, sy) {
+  const seen = new Uint8Array(MW * MH), q = [idx(sx, sy)];
+  seen[q[0]] = 1;
+  for (let h = 0; h < q.length; h++) {
+    const c = q[h], x = c % MW, y = (c / MW) | 0;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (walkable(nx, ny) && !seen[idx(nx, ny)]) { seen[idx(nx, ny)] = 1; q.push(idx(nx, ny)); }
+    }
+  }
+  return seen;
+}
+/** Algum tile alcançável encostado no retângulo (tx,ty,w,h)? */
+function adjReach(reach, tx, ty, w, h) {
+  for (let y = ty - 1; y <= ty + h; y++) for (let x = tx - 1; x <= tx + w; x++) {
+    if (x >= tx && x < tx + w && y >= ty && y < ty + h) continue;
+    if (inB(x, y) && reach[idx(x, y)]) return true;
+  }
+  return false;
+}
+
+const set = (x, y, t) => { if (inB(x, y)) grid[idx(x, y)] = t; };
+function resetMapData() { grid = new Uint8Array(MW * MH); structs = []; propAt = new Map(); bushes = new Set(); pickups = []; mapLights = []; gateTiles = []; }
+
+// ---- Fases 1-3: ao ar livre (acampamento, cemitério, pântano) ----
+const CABIN_POS = [[8, 8], [34, 8], [17, 6], [6, 26], [34, 26], [17, 30]];
+
+function genOutdoor() {
+  const lake = LV.bottom === 'lake';
+  if (lake) {
+    for (let y = 39; y < MH; y++) for (let x = 0; x < MW; x++) set(x, y, T.WATER);
+    for (let y = 2; y <= 38; y++) { set(23, y, T.PATH); set(24, y, T.PATH); }
+    for (let y = 39; y < MH; y++) { set(23, y, T.DOCK); set(24, y, T.DOCK); }
+  } else {                                                  // cemitério: cerca com portão
+    for (let x = 0; x < MW; x++) set(x, 41, T.FENCE);
+    set(23, 41, T.GATE); set(24, 41, T.GATE);
+    for (let y = 2; y <= 40; y++) { set(23, y, T.PATH); set(24, y, T.PATH); }
+    for (let y = 42; y < MH; y++) { set(23, y, T.PATH); set(24, y, T.PATH); }
+  }
+  for (let x = 2; x <= 45; x++) { set(x, 22, T.PATH); set(x, 23, T.PATH); }
+
+  // estruturas (cabines / criptas / palafitas) + trilha da porta até a trilha principal
+  for (const [cx, cy] of CABIN_POS) {
+    for (let dx = 0; dx < 4; dx++) for (let dy = 0; dy < 3; dy++) set(cx + dx, cy + dy, T.CABIN);
+    set(cx + 1, cy + 2, T.DOOR);
+    const py = cy + 3, px = cx + 1;
+    set(px, py, T.PATH);
+    const target = px < 23 ? 23 : 24, dir = px < target ? 1 : -1;
+    for (let x = px; x !== target; x += dir) if (grid[idx(x, py)] === T.G) set(x, py, T.PATH);
+    const lit = Math.random() < 0.5;
+    structs.push({ kind: 'cabin', cx, cy, ix: px * TS + 8, iy: py * TS + 8, r: 14, item: 'battery', searched: false, lit });
+    if (lit) addLight('window', cx + 2, cy + 2, LIGHT_R.window, 4);
+  }
+  GEN.tx = 26; GEN.ty = 19;
+  for (let dx = 0; dx < 2; dx++) for (let dy = 0; dy < 2; dy++) set(GEN.tx + dx, GEN.ty + dy, T.GEN);
+
+  shuffle(structs.slice()).slice(0, LV.fuses).forEach(s => { s.item = 'fuse'; });   // sorteia onde ficam os fusíveis
+
+  // zona protegida: 1 tile em volta de tudo que não é grama/água (mantém corredores livres)
+  const prot = new Uint8Array(MW * MH);
+  for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) {
+    const t = grid[idx(x, y)];
+    if (t === T.G || t === T.WATER) continue;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (inB(x + dx, y + dy)) prot[idx(x + dx, y + dy)] = 1;
+  }
+  const maxY = lake ? 38 : 40;
+  for (let y = 0; y <= maxY; y++) for (let x = 0; x < MW; x++) {
+    if (grid[idx(x, y)] !== T.G) continue;
+    const border = x < 2 || x >= MW - 2 || y < 2;
+    if (border || (!prot[idx(x, y)] && Math.random() < LV.density)) set(x, y, T.TREE);
+  }
+  if (LV.mud) {                                             // pântano: poças de lama (lentas) e lagoas (intransponíveis)
+    for (let k = 0; k < 18; k++) {
+      const cx = 3 + rnd(42), cy = 3 + rnd(34), rr = 2 + rnd(3);
+      for (let y = cy - rr; y <= cy + rr; y++) for (let x = cx - rr; x <= cx + rr; x++)
+        if (inB(x, y) && grid[idx(x, y)] === T.G && Math.hypot(x - cx, y - cy) <= rr) set(x, y, T.MUD);
+    }
+    for (let k = 0; k < 7; k++) {
+      const cx = 4 + rnd(40), cy = 4 + rnd(32), rr = 1 + rnd(2);
+      for (let y = cy - rr; y <= cy + rr; y++) for (let x = cx - rr; x <= cx + rr; x++)
+        if (inB(x, y) && (grid[idx(x, y)] === T.G || grid[idx(x, y)] === T.MUD) && !prot[idx(x, y)] && Math.hypot(x - cx, y - cy) <= rr) set(x, y, T.WATER);
+    }
+  }
+
+  START.x = 23 * TS + 16; START.y = 3 * TS + 8;
+  if (lake) {
+    EXIT = { x: 23 * TS, y: 43 * TS, w: 32, h: 32, style: 'boat' };
+    APP.tx = 23; APP.ty = 42;
+  } else {
+    EXIT = { x: 23 * TS, y: 41 * TS, w: 32, h: 16, style: 'gate' };
+    gateTiles = [idx(23, 41), idx(24, 41)];
+    APP.tx = 23; APP.ty = 40;
+  }
+  return true;
+}
+
+// ---- Fase 4: sanatório (salas ligadas por corredores) ----
+function genHospital() {
+  grid.fill(T.WALL);
+  const RX = [2, 14, 26, 38], RY = [2, 14, 26, 38], RW = 8, rh = (j) => (j === 3 ? 7 : 8);
+  const carve = (x0, y0, w, h) => { for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) set(x, y, T.FLOOR); };
+  for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) carve(RX[i], RY[j], RW, rh(j));
+
+  // corredores: árvore geradora (DFS) + alguns laços extras
+  const links = new Set(), key = (a, b) => Math.min(a, b) * 100 + Math.max(a, b);
+  const vis = new Array(16).fill(false), stack = [0]; vis[0] = true;
+  while (stack.length) {
+    const c = stack[stack.length - 1], i = c % 4, j = (c / 4) | 0, nb = [];
+    for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const ni = i + di, nj = j + dj;
+      if (ni >= 0 && ni < 4 && nj >= 0 && nj < 4 && !vis[nj * 4 + ni]) nb.push(nj * 4 + ni);
+    }
+    if (!nb.length) { stack.pop(); continue; }
+    const n = nb[rnd(nb.length)];
+    links.add(key(c, n)); vis[n] = true; stack.push(n);
+  }
+  for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
+    const c = j * 4 + i;
+    if (i < 3 && !links.has(key(c, c + 1)) && Math.random() < 0.35) links.add(key(c, c + 1));
+    if (j < 3 && !links.has(key(c, c + 4)) && Math.random() < 0.35) links.add(key(c, c + 4));
+  }
+  for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
+    const c = j * 4 + i;
+    if (i < 3 && links.has(key(c, c + 1))) for (let x = RX[i] + RW; x < RX[i + 1]; x++) { set(x, RY[j] + 3, T.FLOOR); set(x, RY[j] + 4, T.FLOOR); }
+    if (j < 3 && links.has(key(c, c + 4))) for (let y = RY[j] + rh(j); y < RY[j + 1]; y++) { set(RX[i] + 3, y, T.FLOOR); set(RX[i] + 4, y, T.FLOOR); }
+  }
+
+  // gerador na sala (1,1)
+  GEN.tx = RX[1] + 1; GEN.ty = RY[1] + 1;
+  for (let dx = 0; dx < 2; dx++) for (let dy = 0; dy < 2; dy++) set(GEN.tx + dx, GEN.ty + dy, T.GEN);
+
+  // armários (locais de busca) encostados na parede de cima de 8 salas
+  const rooms = shuffle([...Array(16).keys()].filter(c => c !== 0)).slice(0, 8);
+  const lockers = [];
+  for (const c of rooms) {
+    const i = c % 4, j = (c / 4) | 0, x = RX[i] + 1 + rnd(6), y = RY[j];
+    if (grid[idx(x, y)] !== T.FLOOR) continue;
+    set(x, y, T.PROP);
+    const s = { kind: 'prop', ix: x * TS + 8, iy: y * TS + 8, r: 20, item: 'battery', searched: false };
+    structs.push(s); propAt.set(idx(x, y), s); lockers.push(s);
+  }
+  if (lockers.length < LV.fuses + 1) return false;
+  shuffle(lockers).slice(0, LV.fuses).forEach(s => { s.item = 'fuse'; });
+
+  // camas (obstáculos), longe das linhas de porta; nada na sala da saída
+  for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
+    if ((i === 3 && j === 3) || Math.random() > 0.65) continue;
+    const bx = RX[i] + 1 + rnd(5), by = RY[j] + (Math.random() < 0.5 ? 2 : 5);
+    if (grid[idx(bx, by)] === T.FLOOR && grid[idx(bx + 1, by)] === T.FLOOR) { set(bx, by, T.FURN); set(bx + 1, by, T.FURN); }
+  }
+
+  START.x = (RX[0] + 4) * TS + 8; START.y = (RY[0] + 4) * TS + 8;
+  set(40, 44, T.GATE); set(41, 44, T.GATE); gateTiles = [idx(40, 44), idx(41, 44)];
+  EXIT = { x: 40 * TS, y: 44 * TS, w: 32, h: 16, style: 'door' };
+  APP.tx = 40; APP.ty = 43;
+  return true;
+}
+
+// ---- Fase 5: mina (labirinto de túneis estreitos) ----
+function genMine() {
+  grid.fill(T.WALL);
+  const CW = 16, CH = 15, N = CW * CH;
+  const cellTL = (c) => [3 * (c % CW) + 1, 3 * ((c / CW) | 0) + 1];
+  for (let c = 0; c < N; c++) { const [x, y] = cellTL(c); for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) set(x + dx, y + dy, T.FLOOR); }
+
+  const adj = Array.from({ length: N }, () => []);                     // passagens entre células
+  const link = (a, b) => { if (!adj[a].includes(b)) { adj[a].push(b); adj[b].push(a); } };
+  const vis = new Uint8Array(N), stack = [0]; vis[0] = 1;
+  while (stack.length) {                                                // DFS: labirinto perfeito
+    const c = stack[stack.length - 1], i = c % CW, j = (c / CW) | 0, nb = [];
+    for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const ni = i + di, nj = j + dj;
+      if (ni >= 0 && ni < CW && nj >= 0 && nj < CH && !vis[nj * CW + ni]) nb.push(nj * CW + ni);
+    }
+    if (!nb.length) { stack.pop(); continue; }
+    const n = nb[rnd(nb.length)];
+    link(c, n); vis[n] = 1; stack.push(n);
+  }
+  for (let c = 0; c < N; c++) {                                         // laços extras (menos becos)
+    const i = c % CW, j = (c / CW) | 0;
+    if (i < CW - 1 && Math.random() < 0.16) link(c, c + 1);
+    if (j < CH - 1 && Math.random() < 0.16) link(c, c + CW);
+  }
+  for (let c = 0; c < N; c++) for (const n of adj[c]) {                 // abre as passagens
+    if (n < c) continue;
+    const [x, y] = cellTL(c);
+    if (n === c + 1) { set(x + 2, y, T.FLOOR); set(x + 2, y + 1, T.FLOOR); }
+    else { set(x, y + 2, T.FLOOR); set(x + 1, y + 2, T.FLOOR); }
+  }
+
+  const exitCell = N - 1;
+  // distância (em células) a partir do início
+  const dcell = new Int16Array(N).fill(-1); dcell[0] = 0;
+  const q = [0];
+  for (let h = 0; h < q.length; h++) for (const n of adj[q[h]]) if (dcell[n] < 0) { dcell[n] = dcell[q[h]] + 1; q.push(n); }
+  const deadEnds = [...Array(N).keys()].filter(c => adj[c].length === 1 && c !== 0 && c !== exitCell && dcell[c] >= 14);
+  if (!deadEnds.length) return false;
+  const gc = deadEnds[rnd(deadEnds.length)];
+  const [gx, gy] = cellTL(gc);
+  GEN.tx = gx; GEN.ty = gy;
+  for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) set(gx + dx, gy + dy, T.GEN);
+
+  // caixotes (locais de busca): um em cada uma de várias células
+  const cand = shuffle([...Array(N).keys()].filter(c => c !== 0 && c !== exitCell && c !== gc)).slice(0, LV.fuses + 4);
+  const crates = [];
+  for (const c of cand) {
+    const [x, y] = cellTL(c), cx = x + rnd(2), cy = y + rnd(2);
+    set(cx, cy, T.PROP);
+    const s = { kind: 'prop', ix: cx * TS + 8, iy: cy * TS + 8, r: 20, item: 'battery', searched: false };
+    structs.push(s); propAt.set(idx(cx, cy), s); crates.push(s);
+  }
+  shuffle(crates).slice(0, LV.fuses).forEach(s => { s.item = 'fuse'; });
+
+
+  START.x = 2 * TS; START.y = 2 * TS;
+  const [ex, ey] = cellTL(exitCell);                                     // elevador: 2 tiles na base da célula final
+  set(ex, ey + 1, T.GATE); set(ex + 1, ey + 1, T.GATE); gateTiles = [idx(ex, ey + 1), idx(ex + 1, ey + 1)];
+  EXIT = { x: ex * TS, y: (ey + 1) * TS, w: 32, h: 16, style: 'lift' };
+  APP.tx = ex; APP.ty = ey;
+  return true;
+}
+
+/** Confere se tudo é alcançável e distribui esconderijos e pilhas. */
+const LIGHT_R = { post: 56, fire: 62, candle: 28, wisp: 32, wall: 48, emerg: 38, torch: 44, window: 34 };
+function addLight(kind, tx, ty, r, oy = 0) {
+  mapLights.push({ kind, x: tx * TS + 8, y: ty * TS + 8 + oy, r, ph: Math.random() * 6.28, tx, ty });
+}
+/** Espalha luzes conforme o cenario: postes, fogueiras, velas, fogos-fatuos, luminarias de parede, tochas. */
+function placeLights() {
+  const wl = new Uint8Array(MW * MH);
+  for (const i of walkList) wl[i] = 1;
+  const d = LV.lamps, th = LV.theme;
+  const far = (tx, ty, sp, kinds) => !mapLights.some(l => l.kind !== 'window' && (!kinds || kinds.includes(l.kind)) && Math.max(Math.abs(l.tx - tx), Math.abs(l.ty - ty)) < sp);
+  const nb = (x, y, t) => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([a, b]) => inB(x + a, y + b) && grid[idx(x + a, y + b)] === t);
+  const tiles = (f) => shuffle(walkList.filter(i => f(i % MW, (i / MW) | 0, grid[i])).slice());
+  const put = (list, n, kind, sp, oy = 0, kinds) => {
+    let c = 0;
+    for (const i of list) { if (c >= n) break; const x = i % MW, y = (i / MW) | 0; if (far(x, y, sp, kinds)) { addLight(kind, x, y, LIGHT_R[kind], oy); c++; } }
+  };
+  if (LV.gen === 'outdoor') {
+    const nearPath = tiles((x, y, t) => (t === T.G || t === T.MUD) && y < 38 && (nb(x, y, T.PATH) || nb(x, y, T.DOCK)));
+    const anyG = tiles((x, y, t) => (t === T.G || t === T.MUD) && y < 38 && Math.hypot(x * TS - START.x, y * TS - START.y) > 40);
+    if (th === 'forest') {
+      put(nearPath, Math.round(16 * d), 'post', 7);
+      put(anyG, 2, 'fire', 10, 0, ['fire']);
+    } else if (th === 'cemetery') {
+      put(nearPath, Math.round(8 * d), 'post', 7);
+      const near = tiles((x, y, t) => t === T.G && y < 38 && (nb(x, y, T.TREE) || nb(x, y, T.CABIN)));
+      put(near, Math.round(14 * d), 'candle', 4, 0, ['candle']);
+    } else {
+      put(nearPath, Math.round(6 * d), 'post', 7);
+      put(anyG, Math.round(12 * d), 'wisp', 6, 0, ['wisp']);
+    }
+  } else {
+    const kind = LV.gen === 'hospital' ? 'wall' : 'torch';
+    const cand = tiles((x, y, t) => t === T.FLOOR && inB(x, y - 1) && grid[idx(x, y - 1)] === T.WALL);
+    const sp = LV.gen === 'hospital' ? 9 : 6;
+    const n = Math.round((LV.gen === 'hospital' ? 14 : 30) * d);
+    const near = (px, py) => cand.slice().sort((a, b) => Math.hypot((a % MW) * TS - px, ((a / MW) | 0) * TS - py) - Math.hypot((b % MW) * TS - px, ((b / MW) | 0) * TS - py))[0];
+    const s0 = near(START.x, START.y); if (s0 !== undefined) addLight(kind, s0 % MW, (s0 / MW) | 0, LIGHT_R[kind], -6);
+    put(cand, n, kind, sp, -6, [kind]);
+    if (LV.gen === 'hospital') {                                  // luzes de emergencia piscando perto da saida e em salas ao acaso
+      const e0 = near(EXIT.x, EXIT.y); if (e0 !== undefined) addLight('emerg', e0 % MW, (e0 / MW) | 0, LIGHT_R.emerg, -6);
+      put(cand, 2, 'emerg', 12, -6, ['emerg']);
+    }
+  }
+}
+
+function finalizeMap() {
+  GEN.x = (GEN.tx + 1) * TS; GEN.y = (GEN.ty + 1) * TS;          // centro do gerador (2x2 tiles)
+  const sx = Math.floor(START.x / TS), sy = Math.floor(START.y / TS);
+  if (!walkable(sx, sy)) return false;
+  const reach = floodReach(sx, sy);
+  for (const s of structs) {
+    const tx = Math.floor(s.ix / TS), ty = Math.floor(s.iy / TS);
+    if (s.kind === 'cabin') { if (!reach[idx(tx, ty)]) return false; }
+    else if (!adjReach(reach, tx, ty, 1, 1)) return false;
+  }
+  if (!adjReach(reach, GEN.tx, GEN.ty, 2, 2)) return false;
+  if (!reach[idx(APP.tx, APP.ty)]) return false;
+
+  walkList = [];
+  for (let i = 0; i < MW * MH; i++) if (reach[i] && grid[i] !== T.DOCK) walkList.push(i);
+  const spots = walkList.filter(i => (grid[i] === T.G || grid[i] === T.FLOOR) &&
+    !(LV.gen === 'outdoor' && ((i / MW) | 0) >= 38) &&
+    Math.hypot((i % MW) * TS + 8 - START.x, ((i / MW) | 0) * TS + 8 - START.y) > 48);
+  shuffle(spots);
+  for (let k = 0; k < Math.min(LV.hide, spots.length); k++) bushes.add(spots[k]);
+  let placed = 0;
+  for (const i of spots) {
+    if (placed >= LV.batt) break;
+    if (bushes.has(i)) continue;
+    const x = (i % MW) * TS + 8, y = ((i / MW) | 0) * TS + 8;
+    if (Math.hypot(x - START.x, y - START.y) < 120) continue;
+    pickups.push({ x, y, got: false }); placed++;
+  }
+  return true;
+}
+
+function genMap() {
+  for (let attempt = 0; attempt < 120; attempt++) {
+    resetMapData();
+    const ok = LV.gen === 'outdoor' ? genOutdoor() : LV.gen === 'hospital' ? genHospital() : genMine();
+    if (ok && finalizeMap()) { placeLights(); return; }
+  }
+  throw new Error('Nao foi possivel gerar o mapa');
+}
+
+/** Energia ligada: abre os portões e reinicia os caminhos dos vilões. */
+function openGates() {
+  for (const i of gateTiles) grid[i] = LV.gen === 'outdoor' ? T.PATH : T.FLOOR;
+  for (const k of killers) k.field.key = -1;
+}
+
+
+/* ======================= 6. CAMINHOS (BFS p/ os vilões) =================== */
+function buildField(f, tx, ty) {
+  const key = idx(tx, ty);
+  if (key === f.key) return;
+  f.key = key;
+  const dist = f.dist;
+  dist.fill(-1);
+  dist[key] = 0;
+  const q = [key];
+  for (let h = 0; h < q.length; h++) {
+    const c = q[h], x = c % MW, y = (c / MW) | 0, d = dist[c];
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (walkable(nx, ny) && dist[idx(nx, ny)] < 0) { dist[idx(nx, ny)] = d + 1; q.push(idx(nx, ny)); }
+    }
+  }
+}
+/** Linha de visão livre (sem árvores/paredes) entre dois pontos? */
+function hasLOS(x0, y0, x1, y1) {
+  const d = Math.hypot(x1 - x0, y1 - y0), n = Math.ceil(d / 4);
+  for (let i = 1; i < n; i++) {
+    const tx = Math.floor((x0 + (x1 - x0) * i / n) / TS), ty = Math.floor((y0 + (y1 - y0) * i / n) / TS);
+    if (tileSolid(tx, ty) && grid[idx(tx, ty)] !== T.WATER && grid[idx(tx, ty)] !== T.FENCE && grid[idx(tx, ty)] !== T.PROP && grid[idx(tx, ty)] !== T.FURN) return false;
+  }
+  return true;
+}
+
+
+/* =============================== ESTADO =================================== */
+let state = 'title';   // title | intro | play | levelup | gameover | win
+let paused = false, frame = 0, lockT = 0, introT = 0, playFrames = 0;
+let camX = 0, camY = 0, camI = 0, camJ = 0;
+let level = 0, startLevel = 0, unlocked = 1;
+let fusesHeld = 0, fusesIn = 0, powered = false;
+let flash = 0, flashCol = '#FCFCFC', shake = 0;
+let messages = [];
+let endT = 0;
+let score = 0, levelStartScore = 0, hiScore = 0, lastBonus = null;
+
+try {
+  unlocked = clamp(parseInt(localStorage.getItem('nln_unlocked') || '1', 10) || 1, 1, LEVELS.length);
+  hiScore = parseInt(localStorage.getItem('nln_hi') || '0', 10) || 0;
+  mode = clamp(parseInt(localStorage.getItem('nln_mode') || '0', 10) || 0, 0, MODES.length - 1);
+} catch (e) { /* sem storage */ }
+function saveProgress() { try { localStorage.setItem('nln_unlocked', String(unlocked)); localStorage.setItem('nln_hi', String(hiScore)); localStorage.setItem('nln_mode', String(mode)); } catch (e) { /* ignora */ } }
+
+const P = {
+  x: 0, y: 0, r: 4, fx: 0, fy: 1, moving: false, sprint: false,
+  stamina: 100, tired: false, battery: 100, lightOn: true, hp: START_HP, inv: 0,
+  hidden: false, prog: 0, act: null, noise: 20, anim: 0, dead: false
+};
+let killers = [];
+function makeKiller(variant) {
+  return { x: 0, y: 0, r: 5, state: 'patrol', stun: 0, wait: 0, lost: 0, last: null, tx: 0, ty: 0,
+           face: 1, fy: 1, anim: 0, variant, field: { key: -1, dist: new Int16Array(MW * MH) } };
+}
+
+function msg(text, t = 170) { messages = [{ text, t }]; }
+function toggleLight() {
+  if (P.dead) return;
+  if (P.battery > 0) {
+    P.lightOn = !P.lightOn; sfx.click();
+    msg(P.lightOn ? 'LANTERNA LIGADA' : 'LANTERNA APAGADA - FIQUE QUIETO', 110);
+  } else sfx.empty();
+}
+
+/** Prepara e inicia a fase `level` (mapa novo, vilões novos). */
+function beginLevel() {
+  LV = LEVELS[level];
+  genMap();
+  fusesHeld = 0; fusesIn = 0; powered = false; playFrames = 0;
+  Object.assign(P, { x: START.x, y: START.y, fx: 0, fy: 1, stamina: 100, tired: false, battery: 100,
+    lightOn: true, inv: 0, hidden: false, prog: 0, act: null, dead: false });
+  killers = [];
+  for (let n = 0; n < LV.killers; n++) {
+    const k = makeKiller(n);
+    const minD = LV.gen === 'outdoor' ? 450 : 330;
+    let far = walkList.filter(i => Math.hypot((i % MW) * TS + 8 - START.x, ((i / MW) | 0) * TS + 8 - START.y) > minD &&
+      killers.every(o => Math.hypot((i % MW) * TS + 8 - o.x, ((i / MW) | 0) * TS + 8 - o.y) > 250));
+    if (!far.length) far = walkList.slice().sort((a, b) =>
+      Math.hypot((b % MW) * TS - START.x, ((b / MW) | 0) * TS - START.y) - Math.hypot((a % MW) * TS - START.x, ((a / MW) | 0) * TS - START.y)).slice(0, 30);
+    const s = far[rnd(far.length)];
+    k.x = (s % MW) * TS + 8; k.y = ((s / MW) | 0) * TS + 8;
+    killers.push(k);
+    pickWaypoint(k);
+  }
+  camX = clamp(P.x - W / 2, 0, MW * TS - W); camY = clamp(P.y - H / 2, 0, MH * TS - H);
+  messages = []; flash = 0; shake = 0; endT = 0; paused = false; fear = 0; chasing = false;
+  levelStartScore = score;
+  state = 'intro'; introT = 0; lockT = 0;
+  ambient.stop();
+  sfx.start();
+}
+
+function onAction() {
+  if (state === 'title') { score = 0; level = startLevel; P.hp = START_HP; beginLevel(); }
+  else if (state === 'intro' && introT > 40) {
+    state = 'play';
+    ambient.start(LV.theme, [55, 49, 46, 41, 36][level]);
+    msg('ACHE ' + LV.fuses + ' FUSIVEIS');
+  }
+  else if (state === 'levelup' && lockT > 60) { level++; P.hp = Math.min(START_HP, P.hp + 1); beginLevel(); }
+  else if (state === 'gameover' && lockT > 60) { score = levelStartScore; P.hp = START_HP; beginLevel(); }
+  else if (state === 'win' && lockT > 90) { state = 'title'; startLevel = 0; }
+}
+function togglePause() {
+  if (state !== 'play' || P.dead) return;
+  paused = !paused;
+  if (audio.ctx) { if (paused) audio.ctx.suspend(); else audio.ctx.resume(); }
+}
+function autoPause() { if (state === 'play' && !paused && !P.dead) togglePause(); }
+
+
+/* =============================== 7. JOGADOR =============================== */
+function updatePlayer() {
+  let dx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+  let dy = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);
+  P.moving = dx !== 0 || dy !== 0;
+  if (P.moving) { const l = Math.hypot(dx, dy); dx /= l; dy /= l; P.fx = dx; P.fy = dy; }
+
+  // fôlego: correr cansa; só volta a correr depois de recuperar um pouco
+  P.sprint = P.moving && keys.run && P.stamina > 0 && !P.tired && P.prog === 0;
+  if (P.sprint) { P.stamina = Math.max(0, P.stamina - 0.8); if (P.stamina <= 0) P.tired = true; }
+  else { P.stamina = Math.min(100, P.stamina + (P.moving ? 0.25 : 0.5)); if (P.tired && P.stamina > 30) P.tired = false; }
+  const inMud = tileAt(P.x, P.y) === T.MUD;
+  const speed = P.prog > 0 ? 0 : (P.sprint ? 1.75 : 1.0) * (inMud ? 0.6 : 1);
+  if (speed) tryMove(P, dx * speed, dy * speed);
+  if (P.moving) P.anim += (P.sprint ? 0.22 : 0.13) * (inMud ? 0.6 : 1);
+
+  // lanterna
+  if (P.lightOn) {
+    P.battery = Math.max(0, P.battery - LV.drain);
+    if (P.battery <= 0) { P.lightOn = false; msg('A PILHA ACABOU!'); sfx.empty(); }
+  }
+  // esconderijo: sobre um arbusto/cortina/barril sem correr
+  P.hidden = bushes.has(idx(Math.floor(P.x / TS), Math.floor(P.y / TS))) && !P.sprint;
+  // ruído que os vilões podem ouvir
+  P.noise = P.prog > 0 ? 130 : P.sprint ? 160 : P.moving ? 70 : 25;
+  if (P.hidden) P.noise = Math.min(P.noise, 40);
+  // pilhas no chão
+  for (const p of pickups) {
+    if (!p.got && Math.hypot(p.x - P.x, p.y - P.y) < 9) {
+      p.got = true; P.battery = Math.min(100, P.battery + 55); sfx.pickup(); msg('PILHA NOVA!', 100);
+    }
+  }
+  if (P.inv > 0) P.inv--;
+}
+
+
+/* ============================== 8. OS VILÕES ============================== */
+function pickWaypoint(k, nearPlayer) {
+  for (let t = 0; t < 30; t++) {
+    const i = walkList[rnd(walkList.length)];
+    const x = (i % MW) * TS + 8, y = ((i / MW) | 0) * TS + 8;
+    if (Math.hypot(x - k.x, y - k.y) < 150) continue;
+    if (nearPlayer && Math.hypot(x - P.x, y - P.y) > 170) continue;
+    k.tx = i % MW; k.ty = (i / MW) | 0;
+    return;
+  }
+  const i = walkList[rnd(walkList.length)];
+  k.tx = i % MW; k.ty = (i / MW) | 0;
+}
+function setTargetXY(k, x, y) { k.tx = clamp(Math.floor(x / TS), 0, MW - 1); k.ty = clamp(Math.floor(y / TS), 0, MH - 1); }
+
+/** Dá um passo pelo caminho até (k.tx,k.ty). Retorna true ao chegar. */
+function killerStep(k, speed) {
+  if (tileAt(k.x, k.y) === T.MUD) speed *= 0.75;
+  buildField(k.field, k.tx, k.ty);
+  const dist = k.field.dist;
+  const ktx = clamp(Math.floor(k.x / TS), 0, MW - 1), kty = clamp(Math.floor(k.y / TS), 0, MH - 1);
+  const cur = dist[idx(ktx, kty)];
+  let gx = ktx * TS + 8, gy = kty * TS + 8;
+  if (cur < 0) return true;                                // alvo inalcançável
+  if (cur > 0) {
+    let best = cur;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = ktx + dx, ny = kty + dy;
+      if (inB(nx, ny) && dist[idx(nx, ny)] >= 0 && dist[idx(nx, ny)] < best) { best = dist[idx(nx, ny)]; gx = nx * TS + 8; gy = ny * TS + 8; }
+    }
+  }
+  const dx = gx - k.x, dy = gy - k.y, d = Math.hypot(dx, dy);
+  if (d > speed) {
+    k.x += dx / d * speed; k.y += dy / d * speed;
+    k.fy = Math.abs(dy) > Math.abs(dx) ? Math.sign(dy) : 0;
+    if (Math.abs(dx) > 0.2) k.face = Math.sign(dx);
+    k.anim += 0.1;
+    return false;
+  }
+  k.x = gx; k.y = gy;
+  return cur === 0;
+}
+
+function updateKiller(k) {
+  if (k.stun > 0) {                                        // atordoado após atacar
+    if (--k.stun === 0) {                                  // some e reaparece longe
+      const far = walkList.filter(i => Math.hypot((i % MW) * TS + 8 - P.x, ((i / MW) | 0) * TS + 8 - P.y) > 260);
+      const s = far.length ? far[rnd(far.length)] : walkList[rnd(walkList.length)];
+      k.x = (s % MW) * TS + 8; k.y = ((s / MW) | 0) * TS + 8;
+      k.state = 'patrol'; k.lost = 0; pickWaypoint(k);
+    }
+    return 1;
+  }
+  const dx = P.x - k.x, dy = P.y - k.y, d = Math.hypot(dx, dy);
+  const los = hasLOS(k.x, k.y, P.x, P.y);
+  let sightR = (P.sprint ? 150 : P.moving ? 100 : 70) * LV.kSight;
+  sightR *= P.lightOn ? 1.3 : 0.6;                         // lanterna apagada = bem mais difícil de ver você
+  const sees = los && !P.dead && d < (P.hidden ? 22 : sightR);
+
+  if (sees) {
+    if (k.state !== 'chase') { sfx.spot(); flash = 14; flashCol = '#FCFCFC'; }
+    k.state = 'chase'; k.lost = 0; k.last = { x: P.x, y: P.y };
+  } else if (k.state === 'chase') {
+    k.lost++;
+    if (k.lost > (P.lightOn ? 150 : 60)) { k.state = 'search'; k.wait = 0; }   // no escuro ele desiste rápido
+  } else if (k.state === 'patrol' && d < P.noise * LV.kHear && !P.dead) {      // ouviu algo
+    k.state = 'search'; k.wait = 0; k.last = { x: P.x, y: P.y };
+  }
+
+  // velocidade: base da fase + um pouco mais a cada fusível colocado
+  const chaseSpd = Math.min(1.6, (0.9 + 0.08 * fusesIn) * LV.kSpeed);
+  const spd = k.state === 'chase' ? chaseSpd : k.state === 'search' ? 0.55 * LV.kSpeed : 0.4 * LV.kSpeed;
+
+  if (k.state === 'chase') {
+    if (sees && d < 48) {                                  // reta final: vai direto
+      const m = tileAt(k.x, k.y) === T.MUD ? 0.75 : 1;
+      k.x += dx / d * spd * m; k.y += dy / d * spd * m;
+      k.face = dx >= 0 ? 1 : -1; k.fy = Math.abs(dy) > Math.abs(dx) ? Math.sign(dy) : 0; k.anim += 0.12;
+    } else {
+      if (k.last) setTargetXY(k, sees ? P.x : k.last.x, sees ? P.y : k.last.y);
+      killerStep(k, spd);
+    }
+  } else if (k.state === 'search') {
+    if (k.last) setTargetXY(k, k.last.x, k.last.y);
+    if (killerStep(k, spd)) { if (++k.wait > 140) { k.state = 'patrol'; pickWaypoint(k, Math.random() < 0.5); } }
+  } else {
+    if (killerStep(k, spd)) pickWaypoint(k, Math.random() < 0.4);
+  }
+
+  if (d < 11 && P.inv <= 0 && !P.dead) hurtPlayer(k);      // ataque
+  return clamp(1 - d / 230, 0, 1) * (los ? 1 : 0.6);       // medo = proximidade
+}
+
+function updateKillers() {
+  let f = 0, ch = false;
+  for (const k of killers) { f = Math.max(f, updateKiller(k)); if (k.state === 'chase') ch = true; }
+  fear = f;
+  chasing = ch;
+}
+
+function hurtPlayer(k) {
+  P.hp--; P.inv = 150; shake = 18; flash = 16; flashCol = '#D82800';
+  k.stun = 110; k.state = 'patrol';
+  P.prog = 0;
+  sfx.hurt();
+  if (P.hp <= 0) { P.dead = true; endT = 0; ambient.stop(); }
+  else msg(P.hp === 1 ? 'ULTIMA CHANCE!' : 'ELE TE PEGOU! CORRA!');
+}
+
+
+/* ============================ 9. INTERAÇÕES =============================== */
+function updateInteractions() {
+  P.act = null;
+  for (const s of structs) {
+    if (s.searched) continue;
+    if (Math.hypot(P.x - s.ix, P.y - s.iy) < s.r) { P.act = { kind: 'search', s }; break; }
+  }
+  if (!P.act && !powered && Math.hypot(P.x - GEN.x, P.y - GEN.y) < 30) P.act = { kind: 'gen' };
+
+  if (P.act && keys.act && !P.moving) {
+    P.prog++;
+    const need = P.act.kind === 'gen' ? 45 : 80;
+    if (P.prog % 28 === 1) sfx.creak();
+    if (P.prog >= need) { P.prog = 0; completeAction(P.act); keys.act = false; }
+  } else P.prog = 0;
+
+  // saída
+  const inExit = P.x >= EXIT.x && P.x <= EXIT.x + EXIT.w && P.y >= EXIT.y && P.y <= EXIT.y + EXIT.h;
+  if (inExit) {
+    if (powered) completeLevel();
+    else if (frame % 120 === 0) msg('FALTA ENERGIA! LIGUE O GERADOR.');
+  }
+}
+
+function completeAction(a) {
+  if (a.kind === 'search') {
+    a.s.searched = true;
+    if (a.s.item === 'fuse') { fusesHeld++; sfx.fuse(); msg('ACHOU UM FUSIVEL! (' + (fusesHeld + fusesIn) + '/' + LV.fuses + ')'); }
+    else { P.battery = Math.min(100, P.battery + 45); sfx.pickup(); msg('ACHOU UMA PILHA!'); }
+  } else if (a.kind === 'gen') {
+    if (fusesHeld === 0) { sfx.empty(); msg('TRAGA OS FUSIVEIS (' + fusesIn + '/' + LV.fuses + ')'); return; }
+    fusesIn += fusesHeld; fusesHeld = 0; sfx.fuse();
+    if (fusesIn >= LV.fuses) {
+      powered = true; openGates(); sfx.power(); shake = 14;
+      msg('ENERGIA LIGADA! ' + LV.way + '!', 260);
+    } else msg('FUSIVEL COLOCADO (' + fusesIn + '/' + LV.fuses + ')... ELE FICOU MAIS RAPIDO');
+  }
+}
+
+/** Fase vencida: bônus, desbloqueio da próxima e tela de resultado. */
+function completeLevel() {
+  if (state !== 'play') return;
+  const secs = Math.floor(playFrames / 60);
+  lastBonus = { base: 1000 * (level + 1), hearts: P.hp * 500, time: Math.max(0, 300 - secs) * 10 };
+  const raw = lastBonus.base + lastBonus.hearts + lastBonus.time;
+  lastBonus.total = Math.round(raw * MODES[mode].mult);
+  score += lastBonus.total;
+  if (score > hiScore) hiScore = score;
+  unlocked = Math.max(unlocked, Math.min(LEVELS.length, level + 2));
+  saveProgress();
+  state = level >= LEVELS.length - 1 ? 'win' : 'levelup';
+  lockT = 0; ambient.stop(); fear = 0; chasing = false;
+  if (state === 'win') sfx.win(); else sfx.clear();
+}
+function failLevel() {
+  if (state !== 'play') return;
+  state = 'gameover'; lockT = 0; ambient.stop(); fear = 0; chasing = false;
+  saveProgress();
+  sfx.lose();
+}
+
+
+/* ============================== ATUALIZAÇÃO =============================== */
+function update() {
+  frame++;
+  if (shake > 0) shake--;
+  if (flash > 0) flash--;
+  if (state === 'intro') introT++;
+  if (state === 'gameover' || state === 'win' || state === 'levelup') lockT++;
+  if (state !== 'play' || paused) return;
+  playFrames++;
+
+  for (const m of messages) m.t--;
+  messages = messages.filter(m => m.t > 0);
+
+  if (!P.dead) { updatePlayer(); updateInteractions(); }
+  else { endT++; if (endT > 100) failLevel(); }
+  if (state !== 'play') return;
+  updateKillers();
+
+  const tx = clamp(P.x - W / 2, 0, MW * TS - W), ty = clamp(P.y - H / 2, 0, MH * TS - H);
+  camX += (tx - camX) * 0.18; camY += (ty - camY) * 0.18;
+}
+
+
+/* ============================= 10. DESENHO ================================ */
+const wr = (col, x, y, w, h) => { ctx.fillStyle = col; ctx.fillRect(Math.round(x) - camI, Math.round(y) - camJ, w, h); };
+
+const mkTile = (fn) => { const c = document.createElement('canvas'); c.width = c.height = TS; fn(c.getContext('2d')); return c; };
+const R = (g, col, x, y, w, h) => { g.fillStyle = col; g.fillRect(x, y, w, h); };
+const speckle = (g, base, c1, c2, v) => {
+  R(g, base, 0, 0, 16, 16);
+  [[2, 3], [9, 1], [13, 7], [5, 11], [11, 13], [1, 8], [7, 6]].forEach(([x, y], i) => {
+    R(g, (i + v) % 3 ? c1 : c2, (x + v * 3) % 15, (y + v * 5) % 15, 1, 2);
+  });
+};
+
+// ---------- ARTE POR TEMA ----------
+const ART = {};
+
+// Acampamento (floresta)
+ART.forest = {
+  ground: [0, 1, 2, 3].map(v => mkTile(g => speckle(g, '#123A1A', '#0C2C12', '#1C5426', v))),
+  path: mkTile(g => {
+    R(g, '#4A3A24', 0, 0, 16, 16);
+    [[3, 4], [10, 2], [6, 11], [13, 12], [1, 13]].forEach(([x, y]) => { R(g, '#34281A', x, y, 2, 1); R(g, '#6A5436', x + 4, y + 2, 1, 1); });
+  }),
+  tree: [0, 1, 2].map(v => mkTile(g => {
+    R(g, '#123A1A', 0, 0, 16, 16); R(g, '#4A2C10', 7, 11, 3, 5);
+    R(g, '#0A3A1C', 4, 8, 9, 4); R(g, '#0C4A24', 3, 5, 11, 4); R(g, '#0E5A2C', 5, 2, 7, 4); R(g, '#0A2C14', 7, 0, 3, 3);
+    R(g, '#1A7038', 5 + v, 3, 2, 1); R(g, '#1A7038', 4, 6 + (v % 2), 2, 1);
+  })),
+  hide: mkTile(g => { R(g, '#0C3A16', 2, 6, 12, 8); R(g, '#0E4A1E', 4, 3, 8, 5); R(g, '#145A28', 3, 7, 4, 3); R(g, '#0A2C12', 2, 13, 12, 2); R(g, '#1C7A36', 6, 4, 2, 1); R(g, '#1C7A36', 10, 8, 2, 1); }),
+  water: ['#0C2A5C', '#1A4A8C', '#12386C']
+};
+
+// Cemitério
+ART.cemetery = {
+  ground: [0, 1, 2, 3].map(v => mkTile(g => { speckle(g, '#1E2C26', '#16221E', '#2E4238', v); if (v === 2) R(g, '#808090', 11, 3, 1, 1); })),
+  path: mkTile(g => { R(g, '#46464E', 0, 0, 16, 16); R(g, '#34343C', 0, 7, 16, 1); R(g, '#34343C', 8, 0, 1, 7); R(g, '#34343C', 4, 8, 1, 8); R(g, '#5A5A64', 0, 0, 16, 1); }),
+  deadTree: [0, 1].map(v => mkTile(g => {
+    R(g, '#1E2C26', 0, 0, 16, 16); R(g, '#3C3026', 7, 6, 2, 10);
+    R(g, '#3C3026', 4 + v, 4, 3, 1); R(g, '#3C3026', 9, 3, 4, 1); R(g, '#3C3026', 5, 8, 3, 1); R(g, '#3C3026', 8, 9, 4, 1);
+    R(g, '#3C3026', 3, 5 + v, 1, 3); R(g, '#3C3026', 12, 2, 1, 3);
+  })),
+  tomb: [0, 1, 2].map(v => mkTile(g => {
+    R(g, '#1E2C26', 0, 0, 16, 16); R(g, '#12161A', 3, 13, 10, 2);
+    R(g, '#8C8C98', 4, 5, 8, 9); R(g, '#8C8C98', 5, 4, 6, 1); R(g, '#5C5C68', 11, 5, 1, 9);
+    if (v === 0) { R(g, '#4C4C58', 7, 6, 2, 6); R(g, '#4C4C58', 5, 8, 6, 2); }
+    else { R(g, '#4C4C58', 6, 7, 4, 1); R(g, '#4C4C58', 6, 9, 3, 1); }
+    R(g, '#3A5A3A', 4, 12, 2, 2);
+  })),
+  fence: mkTile(g => {
+    R(g, '#20202E', 0, 5, 16, 2); R(g, '#20202E', 0, 11, 16, 2);
+    for (let i = 0; i < 4; i++) { R(g, '#3A3A4E', i * 4 + 1, 2, 2, 13); R(g, '#3A3A4E', i * 4 + 1, 0, 2, 2); }
+  }),
+  hide: mkTile(g => { R(g, '#3A3220', 3, 6, 10, 8); R(g, '#4A4228', 4, 4, 8, 4); R(g, '#5A5030', 2, 3, 1, 4); R(g, '#5A5030', 13, 4, 1, 4); R(g, '#5A5030', 7, 2, 1, 3); R(g, '#241E10', 3, 13, 10, 2); }),
+  water: ['#10203C', '#1C3460', '#162A4E']
+};
+ART.cemetery.tree = (tx, ty) => ((tx < 2 || tx >= MW - 2 || ty < 2 || (tx * 7 + ty * 13) % 4 === 0)
+  ? ART.cemetery.deadTree[(tx + ty) % 2] : ART.cemetery.tomb[(tx * 3 + ty) % 3]);
+
+// Pântano
+ART.swamp = {
+  ground: [0, 1, 2, 3].map(v => mkTile(g => speckle(g, '#16322A', '#0E241E', '#26503C', v))),
+  path: mkTile(g => { R(g, '#5A4A30', 0, 0, 16, 16); for (let i = 0; i < 4; i++) R(g, '#3A2E1C', 0, i * 4 + 3, 16, 1); R(g, '#7A6644', 0, 0, 16, 1); R(g, '#3A2E1C', 5, 0, 1, 3); R(g, '#3A2E1C', 11, 8, 1, 4); }),
+  mud: mkTile(g => { R(g, '#3A2C14', 0, 0, 16, 16); R(g, '#2A200E', 2, 3, 5, 3); R(g, '#2A200E', 9, 9, 5, 4); R(g, '#6A5428', 11, 3, 2, 2); R(g, '#6A5428', 4, 11, 2, 2); R(g, '#4A3A1C', 7, 6, 3, 1); }),
+  tree: [0, 1].map(v => mkTile(g => {
+    R(g, '#16322A', 0, 0, 16, 16); R(g, '#3C2E20', 6, 6, 4, 10); R(g, '#3C2E20', 4, 14, 8, 2);
+    R(g, '#0E3A2A', 3, 2, 10, 6); R(g, '#145040', 5, 1, 6, 3); R(g, '#0A2A1E', 3, 7, 10, 1);
+    R(g, '#6A8A50', 4, 8, 1, 4 + v); R(g, '#6A8A50', 11, 8, 1, 3); R(g, '#6A8A50', 8, 8, 1, 2);
+  })),
+  hide: mkTile(g => { R(g, '#2A5A32', 3, 4, 1, 10); R(g, '#2A5A32', 6, 2, 1, 12); R(g, '#2A5A32', 9, 3, 1, 11); R(g, '#2A5A32', 12, 5, 1, 9); R(g, '#5A8A4A', 6, 2, 1, 2); R(g, '#5A8A4A', 9, 3, 1, 2); R(g, '#3A7A44', 4, 6, 1, 8); R(g, '#3A7A44', 11, 7, 1, 7); }),
+  water: ['#10343C', '#1E5A5C', '#16464C']
+};
+
+// Sanatório
+ART.hospital = {
+  ground: [0, 1].map(v => mkTile(g => {
+    R(g, v ? '#323A46' : '#3A424E', 0, 0, 16, 16); R(g, '#222834', 0, 0, 16, 1); R(g, '#222834', 0, 0, 1, 16);
+    R(g, v ? '#3A424E' : '#323A46', 8, 8, 8, 8); R(g, v ? '#3A424E' : '#323A46', 0, 0, 8, 8);
+    R(g, '#222834', 0, 0, 16, 1); R(g, '#222834', 0, 0, 1, 16);
+  })),
+  wall: mkTile(g => { R(g, '#10141C', 0, 0, 16, 16); R(g, '#1A202C', 0, 0, 16, 2); R(g, '#161C26', 3, 6, 4, 2); R(g, '#161C26', 10, 11, 4, 2); }),
+  wallFace: '#2A3242',
+  prop: mkTile(g => {                                       // armário
+    R(g, '#161C26', 2, 14, 12, 2); R(g, '#6A7A8C', 2, 1, 12, 14); R(g, '#8A9AAC', 2, 1, 12, 2); R(g, '#3A4654', 8, 3, 1, 11);
+    R(g, '#3A4654', 4, 4, 3, 1); R(g, '#3A4654', 4, 6, 3, 1); R(g, '#3A4654', 10, 4, 3, 1); R(g, '#3A4654', 10, 6, 3, 1);
+    R(g, '#D0D0D8', 7, 8, 1, 2); R(g, '#D0D0D8', 9, 8, 1, 2);
+  }),
+  furn: mkTile(g => { R(g, '#4A5A8C', 1, 3, 14, 10); R(g, '#C8D0D8', 2, 4, 12, 8); R(g, '#F0F0F8', 2, 4, 4, 4); R(g, '#8A98B0', 6, 7, 8, 1); R(g, '#222834', 1, 13, 14, 1); }),
+  hide: mkTile(g => { R(g, '#487858', 3, 0, 10, 15); R(g, '#386048', 5, 0, 1, 15); R(g, '#386048', 8, 0, 1, 15); R(g, '#386048', 11, 0, 1, 15); R(g, '#A0A0A8', 2, 0, 12, 1); }),
+  water: ['#0C2A5C', '#1A4A8C', '#12386C']
+};
+ART.hospital.path = ART.hospital.ground[0];
+
+// Mina
+ART.mine = {
+  ground: [0, 1].map(v => mkTile(g => {
+    R(g, '#3A2E24', 0, 0, 16, 16);
+    [[2, 3], [9, 2], [12, 9], [4, 11], [7, 7], [13, 13]].forEach(([x, y], i) => { R(g, (i + v) % 2 ? '#2A2018' : '#54463A', (x + v * 4) % 15, (y + v * 3) % 15, 2, 1); });
+  })),
+  wall: mkTile(g => { R(g, '#1A1410', 0, 0, 16, 16); R(g, '#241C14', 0, 0, 16, 3); R(g, '#2A2018', 4, 7, 3, 2); R(g, '#2A2018', 10, 11, 4, 2); R(g, '#7A6A30', 11, 5, 2, 1); R(g, '#7A6A30', 3, 12, 1, 1); }),
+  wallFace: '#2E2418',
+  prop: mkTile(g => { R(g, '#8A5C2C', 1, 2, 14, 13); R(g, '#B0803C', 1, 2, 14, 1); R(g, '#5A3A18', 1, 6, 14, 1); R(g, '#5A3A18', 1, 10, 14, 1); for (let i = 0; i < 12; i++) R(g, '#6A4420', 2 + i, 3 + ((i * 11) / 12 | 0), 1, 1); R(g, '#3A2410', 1, 14, 14, 1); }),
+  hide: mkTile(g => { R(g, '#6A4A28', 3, 2, 10, 13); R(g, '#2A2A32', 3, 4, 10, 1); R(g, '#2A2A32', 3, 10, 10, 1); R(g, '#8A6A3C', 4, 2, 8, 2); R(g, '#4A3018', 11, 5, 1, 9); }),
+  water: ['#0C2A5C', '#1A4A8C', '#12386C']
+};
+ART.mine.path = ART.mine.ground[0];
+
+// Doca (comum aos temas com lago)
+const dockTile = mkTile(g => {
+  R(g, '#6A4420', 0, 0, 16, 16);
+  R(g, '#3C2410', 0, 5, 16, 1); R(g, '#3C2410', 0, 10, 16, 1); R(g, '#3C2410', 0, 15, 16, 1);
+  R(g, '#8A5C2C', 0, 0, 16, 1); R(g, '#8A5C2C', 0, 6, 8, 1); R(g, '#8A5C2C', 8, 11, 8, 1);
+});
+
+// árvore do tema: vetor de variações (ou função (tx,ty), como no cemitério)
+const treeFor = (art, tx, ty) => (typeof art.tree === 'function' ? art.tree(tx, ty) : art.tree[(tx * 7 + ty * 13) % art.tree.length]);
+
+function drawWater(x, y, tx, ty, cols) {
+  wr(cols[0], x, y, 16, 16);
+  const o = Math.floor(frame / 24 + tx * 3 + ty * 5) % 4;
+  wr(cols[1], x + (o * 3) % 12, y + 4 + (o % 2) * 6, 5, 1);
+  wr(cols[2], x + 8 - (o * 2) % 8, y + 11 - (o % 2) * 6, 4, 1);
+}
+
+// ---------- ESTRUTURAS GRANDES (4x3 tiles) ----------
+function drawStructure(s) {
+  const x = s.cx * TS, y = s.cy * TS, th = LV.theme;
+  if (th === 'cemetery') {                                   // cripta de pedra
+    wr('#22222C', x - 2, y - 2, 68, 52);
+    wr('#686878', x, y + 8, 64, 40); wr('#8A8A9C', x, y + 8, 64, 3);
+    wr('#4E4E5C', x - 2, y - 2, 68, 12); wr('#5A5A6A', x + 8, y - 8, 48, 7); wr('#6A6A7C', x + 20, y - 12, 24, 5);
+    wr('#9A9AAC', x + 5, y + 12, 4, 34); wr('#9A9AAC', x + 55, y + 12, 4, 34);
+    wr('#14141C', x + 18, y + 22, 14, 26); wr('#14141C', x + 20, y + 19, 10, 3);
+    wr('#B0B0C0', x + 31, y - 20, 2, 9); wr('#B0B0C0', x + 28, y - 17, 8, 2);
+    if (s.lit) { wr('#A0C8FC', x + 42, y + 24, 8, 12); wr('#14141C', x + 45, y + 24, 2, 12); }
+  } else if (th === 'swamp') {                                // palafita de madeira
+    wr('#2A2218', x + 2, y + 44, 4, 8); wr('#2A2218', x + 58, y + 44, 4, 8); wr('#2A2218', x + 30, y + 46, 4, 6);
+    wr('#343C2C', x - 2, y - 2, 68, 30);
+    for (let i = 0; i < 4; i++) wr('#46503C', x - 2, y + i * 7, 68, 1);
+    wr('#6A8A50', x + 4, y - 2, 14, 4); wr('#6A8A50', x + 44, y - 2, 10, 3);
+    wr('#5A4A30', x, y + 28, 64, 20);
+    for (let i = 0; i < 64; i += 8) wr('#3A2E1C', x + i, y + 28, 1, 20);
+    wr('#2A1E10', x + 16, y + 30, 16, 18);
+    const win = s.lit ? '#C0C060' : '#10182C';
+    wr('#2A1E10', x + 40, y + 31, 16, 11); wr(win, x + 41, y + 32, 14, 9); wr('#2A1E10', x + 47, y + 32, 2, 9);
+  } else {                                                    // cabine de madeira
+    wr('#3A1C14', x - 2, y - 2, 68, 30);
+    for (let i = 0; i < 4; i++) wr('#52281C', x - 2, y + i * 7, 68, 1);
+    wr('#241008', x - 2, y + 26, 68, 2);
+    wr('#6A3C1A', x, y + 28, 64, 20);
+    for (let i = 0; i < 64; i += 8) wr('#4A280E', x + i, y + 28, 1, 20);
+    wr('#2A1608', x + 16, y + 30, 16, 18); wr('#E0A020', x + 29, y + 40, 2, 2);
+    const win = s.lit ? '#FCD060' : '#10182C';
+    wr('#2A1608', x + 40, y + 31, 16, 11); wr(win, x + 41, y + 32, 14, 9); wr('#2A1608', x + 47, y + 32, 2, 9);
+    wr('#2A1608', x + 3, y + 31, 10, 10); wr(win, x + 4, y + 32, 8, 8);
+  }
+  if (s.searched) wr('#FCFCFC', x + 30, y + 48, 3, 3);       // marca: já revistada
+}
+
+function drawGenerator() {
+  const x = GEN.tx * TS, y = GEN.ty * TS;
+  wr('#000', x - 1, y, 34, 32);
+  wr('#707078', x, y + 2, 32, 28); wr('#A0A0A8', x, y + 2, 32, 3); wr('#404048', x, y + 27, 32, 3);
+  wr('#202028', x + 4, y + 8, 14, 12);
+  for (let i = 0; i < 4; i++) wr('#505058', x + 5, y + 9 + i * 3, 12, 1);
+  const on = powered || (fusesIn > 0 && Math.floor(frame / 20) % 2 === 0);
+  wr(powered ? '#40F060' : (on ? '#FCB800' : '#802020'), x + 22, y + 9, 6, 6);
+  for (let i = 0; i < LV.fuses; i++) wr(i < fusesIn ? '#FCB800' : '#303038', x + 20 + (i % 3) * 4, y + 18 + ((i / 3) | 0) * 5, 3, 3);
+}
+
+// ---------- SAÍDAS ----------
+function drawExit() {
+  const e = EXIT, x = e.x, y = e.y, pw = powered;
+  if (e.style === 'boat') {
+    const bx = 23 * TS, by = 42 * TS;
+    wr('#000', bx - 4, by + 4, 40, 28);
+    wr('#7C4C20', bx - 3, by + 5, 38, 26); wr('#A8682C', bx - 3, by + 5, 38, 3);
+    wr('#4A2C10', bx - 3, by + 28, 38, 3); wr('#4A2C10', bx + 15, by + 8, 2, 20);
+    wr(pw ? '#40F060' : '#601010', bx + 14, by + 10, 4, 4);
+    if (pw) { wr('#FCD060', bx + 2, by + 12, 3, 3); wr('#FCD060', bx + 27, by + 12, 3, 3); }
+  } else if (e.style === 'gate') {                            // portão de ferro do cemitério
+    wr('#6A6A7C', x - 8, y - 12, 8, 28); wr('#8A8A9C', x - 8, y - 12, 8, 3);
+    wr('#6A6A7C', x + 32, y - 12, 8, 28); wr('#8A8A9C', x + 32, y - 12, 8, 3);
+    wr('#20202E', x, y, 32, 16);
+    const open = pw ? 12 : 0;
+    for (let i = 0; i < 2; i++) {                             // barras recolhem para os lados ao abrir
+      wr('#3A3A4E', x + 1 + i * 4 - open, y, 2, 16);
+      wr('#3A3A4E', x + 17 + i * 4 + open, y, 2, 16);
+    }
+    if (!pw) wr('#B0A060', x + 12, y + 6, 8, 3);
+    wr(pw ? '#40F060' : '#D82800', x + 15, y - 8, 3, 3);
+  } else if (e.style === 'door') {                            // porta dupla com placa SAÍDA
+    wr('#10301C', x, y - 13, 32, 10); drawText('SAIDA', x + 1 - camI, y - 12 - camJ, pw ? '#40F060' : '#305038', 1, false);
+    wr('#222834', x - 2, y - 2, 36, 18);
+    if (pw) { wr('#0A0C10', x + 2, y, 28, 16); wr('rgba(64,240,96,0.35)', x + 2, y, 28, 16); wr('#70808C', x, y, 3, 16); wr('#70808C', x + 29, y, 3, 16); }
+    else { wr('#70808C', x, y, 15, 16); wr('#70808C', x + 17, y, 15, 16); wr('#8A9AAC', x, y, 15, 2); wr('#8A9AAC', x + 17, y, 15, 2); wr('#D0D0D8', x + 12, y + 7, 2, 3); wr('#D0D0D8', x + 18, y + 7, 2, 3); }
+  } else {                                                    // elevador da mina
+    wr('#5A4A2A', x - 3, y - 6, 3, 22); wr('#5A4A2A', x + 32, y - 6, 3, 22); wr('#5A4A2A', x - 3, y - 6, 38, 4);
+    wr('#1A1410', x, y - 2, 32, 18);
+    if (pw) { wr('#E8D890', x + 2, y, 28, 16); wr('#8A7A4A', x, y, 3, 16); wr('#8A7A4A', x + 29, y, 3, 16); }
+    else for (let i = 0; i < 8; i++) wr('#8A7A4A', x + 1 + i * 4, y, 2, 16);
+    wr(pw ? '#40F060' : '#D82800', x + 14, y - 12, 4, 4);
+  }
+}
+
+function drawPickups() {
+  const b = Math.floor(frame / 15) % 2;
+  for (const p of pickups) {
+    if (p.got) continue;
+    wr('#000', p.x - 3, p.y - 4, 6, 9);
+    wr('#FCB800', p.x - 2, p.y - 3, 4, 7); wr('#FCFCFC', p.x - 1, p.y - 5, 2, 2);
+    if (b) wr('#FCFCFC', p.x - 2, p.y - 3, 1, 3);
+  }
+}
+
+/** Monitor (12x16): camiseta amarela, bermuda azul; dir: 0 baixo, 1 cima, 2 lado. */
+function drawCounselor(x, y, dir, flip, frm) {
+  const px = Math.round(x) - 6 - camI, py = Math.round(y) - 14 - camJ;
+  const c = (col, rx, ry, w, h) => { ctx.fillStyle = col; ctx.fillRect(px + (flip ? 12 - rx - w : rx), py + ry, w, h); };
+  const legA = frm ? 1 : 0;
+  if (dir === 2) {
+    c('#2038EC', 4, 11, 3, 4 - legA); c('#2038EC', 7, 11, 3, 3 + legA); c('#E8E8E8', 4, 15 - legA, 3, 1); c('#E8E8E8', 7, 14 + legA, 3, 1);
+    c('#FCB800', 3, 6, 6, 6); c('#FCA044', 7, 7, 2, 4);
+    c('#FCA044', 3, 1, 6, 5); c('#5C2C10', 3, 0, 6, 2); c('#5C2C10', 3, 2, 2, 3); c('#000', 7, 3, 1, 1);
+    c('#B0B0B8', 9, 8, 3, 2);
+  } else if (dir === 1) {
+    c('#2038EC', 3, 11, 3, 4 - legA); c('#2038EC', 6, 11, 3, 3 + legA); c('#E8E8E8', 3, 15 - legA, 3, 1); c('#E8E8E8', 6, 14 + legA, 3, 1);
+    c('#FCB800', 2, 6, 8, 6); c('#FCA044', 1, 7, 1, 4); c('#FCA044', 10, 7, 1, 4);
+    c('#5C2C10', 3, 0, 6, 6); c('#FCA044', 4, 5, 4, 1);
+  } else {
+    c('#2038EC', 3, 11, 3, 4 - legA); c('#2038EC', 6, 11, 3, 3 + legA); c('#E8E8E8', 3, 15 - legA, 3, 1); c('#E8E8E8', 6, 14 + legA, 3, 1);
+    c('#FCB800', 2, 6, 8, 6); c('#FCA044', 1, 7, 1, 4); c('#FCA044', 10, 7, 1, 4); c('#B0B0B8', 10, 9, 2, 3);
+    c('#FCA044', 3, 1, 6, 5); c('#5C2C10', 3, 0, 6, 2); c('#000', 4, 3, 1, 1); c('#000', 7, 3, 1, 1);
+  }
+}
+
+/** O Ceifador (14x20). variant 1 = o segundo (sobretudo roxo, olhos laranja). */
+function drawKiller(x, y, dir, flip, frm, variant) {
+  const px = Math.round(x) - 7 - camI, py = Math.round(y) - 17 - camJ;
+  const c = (col, rx, ry, w, h) => { ctx.fillStyle = col; ctx.fillRect(px + (flip ? 14 - rx - w : rx), py + ry, w, h); };
+  const coat = variant ? '#2A1C38' : '#1C1C28', coat2 = variant ? '#3C2A52' : '#2C2C3C', eye = variant ? '#FC9020' : '#FC2020';
+  const legA = frm ? 1 : 0;
+  c('#0C0C14', 3, 15, 3, 4 - legA); c('#0C0C14', 8, 15, 3, 3 + legA);
+  c(coat, 2, 7, 10, 9); c(coat2, 2, 7, 10, 2); c('#101018', 2, 14, 10, 2);
+  c(coat, 3, 0, 8, 8);
+  if (dir === 1) c('#101018', 4, 1, 6, 6);
+  else if (dir === 0) { c('#E8E0C8', 4, 2, 6, 5); c('#E8E0C8', 6, 7, 2, 3); c(eye, 5, 3, 1, 2); c(eye, 8, 3, 1, 2); }
+  else { c('#E8E0C8', 5, 2, 6, 5); c('#E8E0C8', 11, 4, 3, 2); c(eye, 8, 3, 1, 2); }
+  c('#6A3C1A', 12, 4, 1, 12); c('#B0B0B8', 11, 3, 3, 4); c('#707078', 11, 6, 3, 1);   // machado
+}
+
+function drawTiles() {
+  const art = ART[LV.theme];
+  const x0 = Math.max(0, Math.floor(camI / TS)), x1 = Math.min(MW - 1, Math.floor((camI + W) / TS));
+  const y0 = Math.max(0, Math.floor(camJ / TS)), y1 = Math.min(MH - 1, Math.floor((camJ + H) / TS));
+  const ptx = Math.floor(P.x / TS), pty = Math.floor(P.y / TS);
+  for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
+    const t = grid[idx(tx, ty)], sx = tx * TS - camI, sy = ty * TS - camJ;
+    const ground = () => ctx.drawImage(art.ground[(tx * 5 + ty * 11) % art.ground.length], sx, sy);
+    switch (t) {
+      case T.PATH: case T.DOOR: case T.GATE: ctx.drawImage(art.path, sx, sy); break;
+      case T.WATER: drawWater(tx * TS, ty * TS, tx, ty, art.water); break;
+      case T.DOCK: ctx.drawImage(dockTile, sx, sy); break;
+      case T.TREE: ctx.drawImage(treeFor(art, tx, ty), sx, sy); break;
+      case T.MUD: ctx.drawImage(art.mud, sx, sy); break;
+      case T.WALL:
+        ctx.drawImage(art.wall, sx, sy);
+        if (ty + 1 < MH && !SOLID[grid[idx(tx, ty + 1)]]) rect(art.wallFace || '#2A3242', sx, sy + 12, 16, 4);
+        break;
+      case T.PROP: { ground(); ctx.drawImage(art.prop, sx, sy); const s = propAt.get(idx(tx, ty)); if (s && s.searched) rect('#FCFCFC', sx + 7, sy + 7, 2, 2); break; }
+      case T.FURN: ground(); ctx.drawImage(art.furn, sx, sy); break;
+      case T.FENCE: ground(); ctx.drawImage(art.fence, sx, sy); break;
+      default: ground();                                       // G, FLOOR, CABIN, GEN
+    }
+    if (bushes.has(idx(tx, ty)) && !(ptx === tx && pty === ty && P.hidden)) ctx.drawImage(art.hide, sx, sy);
+  }
+}
+
+function drawWorld() {
+  const sh = shake > 0 ? [rnd(5) - 2, rnd(5) - 2] : [0, 0];
+  camI = Math.round(camX) + sh[0]; camJ = Math.round(camY) + sh[1];
+  rect('#000', 0, 0, W, H);
+  drawTiles();
+  for (const s of structs) {
+    if (s.kind !== 'cabin') continue;
+    const sx = s.cx * TS - camI, sy = s.cy * TS - camJ;
+    if (sx < W + 8 && sx > -80 && sy < H + 8 && sy > -60) drawStructure(s);
+  }
+  drawGenerator();
+  drawExit();
+  drawLightSprites();
+  drawPickups();
+  // vilões e jogador, ordenados por profundidade (y)
+  const ents = [{ y: P.y, draw: () => {
+    if (P.dead) { wr('#FCFCFC', P.x - 6, P.y - 3, 12, 4); wr('#FCB800', P.x - 5, P.y - 3, 7, 3); return; }
+    if (P.inv > 0 && Math.floor(frame / 4) % 2 === 0) return;
+    const side = Math.abs(P.fx) > Math.abs(P.fy);
+    drawCounselor(P.x, P.y, side ? 2 : (P.fy < 0 ? 1 : 0), side && P.fx < 0, Math.floor(P.anim) % 2 && P.moving ? 1 : 0);
+  } }];
+  for (const k of killers) ents.push({ y: k.y, draw: () => {
+    if (k.stun > 0 && Math.floor(frame / 3) % 2) return;
+    drawKiller(k.x, k.y, k.fy < 0 ? 1 : k.fy > 0 ? 0 : 2, k.face < 0, Math.floor(k.anim) % 2, k.variant);
+  } });
+  ents.sort((a, b) => a.y - b.y).forEach(e => e.draw());
+  if (P.hidden) ctx.drawImage(ART[LV.theme].hide, Math.floor(P.x / TS) * TS - camI, Math.floor(P.y / TS) * TS - camJ);
+}
+
+// ---- sprites das luzes do cenario ----
+function lightPos(l) {
+  if (l.kind === 'wisp') return [l.x + Math.sin(frame * 0.03 + l.ph) * 5, l.y + Math.cos(frame * 0.025 + l.ph * 1.3) * 4 - 4];
+  return [l.x, l.y];
+}
+function lightFactor(l) {
+  const fl = 0.88 + 0.12 * Math.sin(frame * 0.3 + l.ph * 5);
+  switch (l.kind) {
+    case 'fire': case 'candle': case 'torch': return fl;
+    case 'wall': return l.ph > 4.5 && Math.floor(frame / 6 + l.ph * 7) % 11 === 0 ? 0.3 : 1;
+    case 'emerg': return Math.floor(frame / 30 + l.ph) % 2 ? 0.25 : 1;
+    case 'wisp': return 0.8 + 0.2 * Math.sin(frame * 0.06 + l.ph);
+    default: return 1;
+  }
+}
+function drawLightSprites() {
+  const bluish = LV.theme === 'cemetery', greenish = LV.theme === 'swamp';
+  for (const l of mapLights) {
+    if (l.kind === 'window') continue;
+    const [lx, ly] = lightPos(l), x = Math.round(lx - camI), y = Math.round(ly - camJ);
+    if (x < -20 || x > W + 20 || y < -20 || y > H + 30) continue;
+    const f = Math.floor(frame / 5 + l.ph * 3);
+    switch (l.kind) {
+      case 'post': {
+        const head = bluish ? '#A8D8FC' : greenish ? '#B8FC90' : '#FCE8A0';
+        rect('#2A2A30', x - 1, y - 10, 2, 14); rect('#18181C', x - 3, y + 3, 6, 2);
+        rect('#18181C', x - 3, y - 14, 6, 1); rect(head, x - 2, y - 13, 4, 3);
+        break;
+      }
+      case 'fire': {
+        rect('#3C2410', x - 5, y + 2, 10, 2); rect('#5C3818', x - 4, y + 1, 8, 2);
+        const h = 4 + (f % 3);
+        rect('#D82800', x - 3, y - h + 2, 6, h); rect('#FC8820', x - 2, y - h + 3, 4, h - 1); rect('#FCE060', x - 1, y - h + 5, 2, Math.max(1, h - 4));
+        break;
+      }
+      case 'candle': {
+        rect('#E8E0C0', x - 1, y - 2, 2, 4);
+        rect(f % 2 ? '#FCB800' : '#FC8820', x, y - 4, 1, 2);
+        break;
+      }
+      case 'wisp': {
+        const c = f % 2 ? '#B8FCB8' : '#80E8A0';
+        rect(c, x - 1, y - 1, 3, 3); rect('#FCFCFC', x, y, 1, 1);
+        break;
+      }
+      case 'wall': {
+        const off = lightFactor(l) < 0.5;
+        rect('#303038', x - 3, y - 2, 6, 2); rect(off ? '#706850' : '#FCF0B8', x - 2, y, 4, 2);
+        break;
+      }
+      case 'emerg': {
+        rect('#303038', x - 3, y - 2, 6, 2); rect(lightFactor(l) > 0.5 ? '#FC2020' : '#601010', x - 2, y, 4, 2);
+        break;
+      }
+      case 'torch': {
+        rect('#5C3818', x - 1, y - 1, 2, 5);
+        rect('#D82800', x - 2, y - 5 + (f % 2), 4, 4); rect('#FCB800', x - 1, y - 4 + (f % 2), 2, 3);
+        break;
+      }
+    }
+  }
+}
+
+// ---- escuridão e lanterna (em faixas de 4x4 px, como o "banding" do NES) ----
+const CELL = 4;
+function drawDarkness() {
+  const px = Math.round(P.x) - camI, py = Math.round(P.y - 6) - camJ;
+  const M = MODES[mode];
+  const lights = [];
+  for (const l of mapLights) {
+    const [lx, ly] = lightPos(l), r = l.r * M.ls * lightFactor(l), sx = lx - camI, sy = ly - camJ;
+    if (sx < -r || sx > W + r || sy < -r || sy > H + r) continue;
+    lights.push([sx, sy, r]);
+  }
+  if (powered) { lights.push([GEN.x - camI, GEN.y - camJ, 70 * M.ls]); lights.push([EXIT.x + EXIT.w / 2 - camI, EXIT.y - camJ, 80 * M.ls]); }
+  const flick = P.battery < 20 && Math.random() < 0.12;
+  const on = P.lightOn && !flick;
+  const len = P.battery < 25 ? 64 : 100;
+  const buckets = [[], [], [], []];
+  for (let gy = 0; gy < H / CELL; gy++) for (let gx = 0; gx < W / CELL; gx++) {
+    const cx = gx * CELL + 2, cy = gy * CELL + 2, dx = cx - px, dy = cy - py;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    let L = 0;
+    const r0 = on ? M.r0on : M.r0off;
+    if (r0 > 0 && d < r0) L = 1 - d / r0;
+    if (on && d < len) {
+      const proj = dx * P.fx + dy * P.fy;
+      if (proj > 0) {
+        const cosA = proj / (d || 1);
+        if (cosA > 0.8) L = Math.max(L, Math.min(1, (1 - d / len) * 1.5) * Math.min(1, (cosA - 0.8) / 0.1));
+      }
+    }
+    for (let i = 0; i < lights.length && L < 1; i++) {
+      const l = lights[i], ex = cx - l[0], ey = cy - l[1];
+      if (ex > l[2] || ex < -l[2] || ey > l[2] || ey < -l[2]) continue;
+      const e = Math.sqrt(ex * ex + ey * ey);
+      if (e < l[2]) L = Math.max(L, (1 - e / l[2]) * 0.9);
+    }
+    const lvl = Math.floor(L * 4.999);
+    if (lvl < 4) buckets[lvl].push(gx * CELL, gy * CELL);
+  }
+  for (let lv = 0; lv < 4; lv++) {
+    const b = buckets[lv];
+    if (!b.length) continue;
+    ctx.fillStyle = 'rgba(2,4,16,' + M.alpha[lv] + ')';
+    ctx.beginPath();
+    for (let i = 0; i < b.length; i += 2) ctx.rect(b[i], b[i + 1], CELL, CELL);
+    ctx.fill();
+  }
+  // olhos dos vilões brilham no escuro quando estão perto e à vista
+  for (const k of killers) {
+    if (P.dead || k.stun > 0 || Math.hypot(k.x - P.x, k.y - P.y) > 150 || !hasLOS(P.x, P.y, k.x, k.y)) continue;
+    const kx = Math.round(k.x) - camI, ky = Math.round(k.y) - 12 - camJ, col = k.variant ? '#FC9020' : '#FC2020', o = k.face < 0 ? -1 : 0;
+    rect(col, kx - 3 + o, ky, 2, 2); rect(col, kx + 1 + o, ky, 2, 2);
+  }
+}
+
+function drawStatic() {
+  if (fear < 0.45) return;
+  const n = Math.floor((fear - 0.4) * 60);
+  for (let i = 0; i < n; i++) rect(Math.random() < 0.5 ? '#FCFCFC' : '#404050', rnd(W), rnd(H), 1 + rnd(2), 1);
+  ctx.fillStyle = 'rgba(160,0,0,' + ((fear - 0.45) * 0.5).toFixed(2) + ')';
+  ctx.fillRect(0, 0, W, 4); ctx.fillRect(0, H - 4, W, 4); ctx.fillRect(0, 0, 4, H); ctx.fillRect(W - 4, 0, 4, H);
+}
+
+const HEART = ['.##.##.', '#######', '#######', '.#####.', '..###..', '...#...'];
+function drawHeart(x, y, col) { HEART.forEach((row, j) => { for (let i = 0; i < 7; i++) if (row[i] === '#') rect(col, x + i, y + j, 1, 1); }); }
+
+function drawHUD() {
+  ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, W, 24);
+  for (let i = 0; i < START_HP; i++) drawHeart(6 + i * 10, 6, i < P.hp ? '#FC3838' : '#383840');
+  drawText('FASE ' + (level + 1), 44, 5, '#B0B0B8');
+  drawText('FUSIVEIS ' + (fusesIn + fusesHeld) + '/' + LV.fuses, 6, 15, fusesHeld ? '#FCB800' : '#FCFCFC');
+  drawText('LUZ', 124, 5, P.lightOn ? '#FCFCFC' : '#707078');
+  rect('#000', 144, 4, 52, 8); rect('#383840', 145, 5, 50, 6);
+  rect(P.battery < 25 ? '#D82800' : '#FCB800', 145, 5, Math.round(P.battery * 0.5), 6);
+  drawText('FOL', 124, 15, '#FCFCFC');
+  rect('#000', 144, 14, 52, 8); rect('#383840', 145, 15, 50, 6);
+  rect(P.tired ? '#D82800' : '#3CBCFC', 145, 15, Math.round(P.stamina * 0.5), 6);
+  if (powered) drawText('SAIDA!', 204, 5, '#40F060');
+  if (audio.muted) drawText('MUDO', 214, 15, '#707078');
+}
+
+function drawLightButton() {
+  const b = LIGHT_BTN, on = P.lightOn;
+  rect('#000', b.x - 1, b.y - 1, b.w + 2, b.h + 2);
+  rect(on ? '#FCB800' : '#383840', b.x, b.y, b.w, b.h);
+  rect(on ? '#FCE8A8' : '#58586A', b.x, b.y, b.w, 2);
+  drawText('LANTERNA', b.x + 4, b.y + 3, on ? '#000000' : '#B0B0B8', 1, false);
+  drawText(on ? 'LIGADA' : 'APAGADA', b.x + (on ? 10 : 7), b.y + 12, on ? '#802000' : '#FC7460', 1, false);
+}
+
+function drawPrompts() {
+  if (P.dead) return;
+  const sx = Math.round(P.x) - camI, sy = Math.round(P.y) - camJ;
+  if (P.act) {
+    const gen = P.act.kind === 'gen', need = gen ? 45 : 80;
+    if (P.prog > 0) { rect('#000', sx - 13, sy - 28, 26, 6); rect('#FCB800', sx - 12, sy - 27, Math.round(24 * P.prog / need), 4); }
+    else if (Math.floor(frame / 30) % 2 === 0) drawTextC(gen ? 'SEGURE Z: USAR GERADOR' : 'SEGURE Z: PROCURAR', 186, '#FCFCFC');
+  }
+  if (P.hidden) drawText('ESCONDIDO', sx - 27, sy - 24, '#80D010');
+  if (messages.length) { ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 196, W, 14); drawTextC(messages[0].text, 200, '#FCFCFC'); }
+}
+
+function panel(x, y, w, h) { rect('#B0B0B8', x, y, w, h); rect('#000', x + 2, y + 2, w - 4, h - 4); }
+function drawStars(cx, y, n) {
+  for (let i = 0; i < 5; i++) { const x = cx - 28 + i * 12; rect('#000', x - 1, y - 1, 10, 10); rect(i < n ? '#D82800' : '#383840', x, y, 8, 8); if (i < n) rect('#FC7460', x + 1, y + 1, 3, 2); }
+}
+
+function drawTitle() {
+  rect('#02061C', 0, 0, W, H);
+  for (let y = 0; y < 120; y += 8) rect(y % 16 ? '#050A28' : '#070E34', 0, y, W, 8);
+  for (let i = 0; i < 40; i++) rect('#A0A0C0', (i * 53) % W, (i * 31) % 90, 1, 1);
+  rect('#E8E8C8', 190, 24, 22, 22); rect('#C8C8A0', 196, 30, 5, 5); rect('#C8C8A0', 203, 38, 4, 4);
+  for (let x = -8; x < W + 16; x += 14) {
+    const h = 40 + ((x * 7) % 5) * 8;
+    for (let k = 0; k < 5; k++) rect('#02100A', x + k * 2, 180 - h + k * (h / 5), 14 - k * 4, h / 5 + 1);
+    rect('#02100A', x + 5, 180, 4, 14);
+  }
+  rect('#02100A', 0, 192, W, 48);
+  camI = camJ = 0;
+  drawKiller(156, 206, 0, false, 0, 0);
+  panel(22, 14, 212, 70);
+  drawTextC('NOITE NO', 28, '#FCFCFC', 3);
+  drawTextC('LAGO NEGRO', 54, '#D82800', 3);
+
+  // seleção de fase
+  const lv = LEVELS[startLevel];
+  drawTextC('FASE ' + (startLevel + 1) + ' DE ' + LEVELS.length, 90, '#B0B0B8');
+  if (startLevel > 0) drawText('<', 40, 102, '#FCFCFC', 2);
+  if (startLevel < unlocked - 1) drawText('>', 204, 102, '#FCFCFC', 2);
+  drawTextC(lv.name, 103, '#FCB800');
+  drawStars(W / 2, 118, lv.stars);
+  // modo de escuridao (cima/baixo)
+  const M = MODES[mode];
+  drawText('^', 40, 140, '#FCFCFC'); drawText('v', 40, 149, '#FCFCFC');
+  drawTextC('MODO: ' + M.name, 141, mode === 0 ? '#40F060' : mode === 1 ? '#FCB800' : '#D82800');
+  if (M.mult > 1) drawTextC('PONTOS X' + M.mult, 152, '#B0B0B8');
+  for (let i = 0; i < MODES.length; i++) rect(i === mode ? '#FCFCFC' : '#505058', W / 2 - 10 + i * 8, 162, 4, 4);
+  if (Math.floor(frame / 30) % 2 === 0) drawTextC('PRESSIONE ENTER', 172, '#FCFCFC', 2);
+  drawTextC('CIMA/BAIXO = MODO', 200, '#B0B0B8');
+  drawTextC('RECORDE ' + String(hiScore).padStart(6, '0'), 222, '#FCB800');
+}
+
+function drawIntro() {
+  rect('#000', 0, 0, W, H);
+  drawTextC('FASE ' + (level + 1), 24, '#D82800', 2);
+  drawTextC(LV.name, 48, '#FCFCFC');
+  drawStars(W / 2, 62, LV.stars);
+  drawTextC('DIFICULDADE: ' + LV.diff, 76, '#B0B0B8');
+  drawTextC('MODO: ' + MODES[mode].name, 88, '#FCB800');
+  const lines = ['ACHE ' + LV.fuses + ' FUSIVEIS,', 'LIGUE O GERADOR E', LV.way + '.', '', LV.killers > 1 ? 'DOIS CEIFADORES PATRULHAM!' : 'O CEIFADOR PATRULHA.', 'ELE OUVE VOCE CORRENDO.', '', LV.tip];
+  const shown = Math.floor(introT / 2);
+  let n = 0;
+  lines.forEach((l, i) => { const part = l.slice(0, Math.max(0, shown - n)); n += l.length + 1; drawTextC(part, 104 + i * 12, i === lines.length - 1 ? '#FCB800' : '#FCFCFC', 1); });
+  if (introT > 40 && Math.floor(frame / 30) % 2 === 0) drawTextC('ENTER = COMECAR', 218, '#FCB800');
+}
+
+function drawBonusRow(label, val, y) { drawText(label, 48, y, '#B0B0B8'); drawTextR(String(val), 208, y, '#FCFCFC'); }
+
+function drawLevelUp() {
+  rect('#000', 0, 0, W, H);
+  panel(24, 24, 208, 176);
+  drawTextC('FASE ' + (level + 1) + ' COMPLETA!', 38, '#40F060', 2);
+  drawTextC(LV.name, 60, '#FCFCFC');
+  drawBonusRow('BONUS DA FASE', lastBonus.base, 78);
+  drawBonusRow('CORACOES X' + P.hp, lastBonus.hearts, 90);
+  drawBonusRow('TEMPO', lastBonus.time, 102);
+  drawText('MODO ' + MODES[mode].name, 48, 114, '#B0B0B8'); drawTextR('X' + MODES[mode].mult, 208, 114, '#FCFCFC');
+  rect('#B0B0B8', 48, 128, 160, 1);
+  drawText('TOTAL', 48, 136, '#FCB800'); drawTextR(String(score), 208, 136, '#FCB800');
+  drawTextC('PROXIMA: ' + LEVELS[level + 1].name, 160, '#B0B0B8');
+  drawTextC('DIFICULDADE: ' + LEVELS[level + 1].diff, 172, '#D82800');
+  if (lockT > 60 && Math.floor(frame / 30) % 2 === 0) drawTextC('ENTER = CONTINUAR', 210, '#FCB800');
+}
+
+function drawGameOver() {
+  rect('#000', 0, 0, W, H);
+  drawTextC('FIM DE JOGO', 70, '#D82800', 2);
+  drawTextC('O CEIFADOR LEVOU VOCE...', 98, '#FCFCFC');
+  drawTextC('FASE ' + (level + 1) + ': ' + LV.name, 114, '#B0B0B8');
+  drawTextC('FUSIVEIS COLOCADOS ' + fusesIn + '/' + LV.fuses, 128, '#B0B0B8');
+  drawTextC('PONTOS ' + String(score).padStart(6, '0'), 144, '#FCB800');
+  if (Math.random() < 0.5) rect('#FC2020', 120 + rnd(2), 176, 2, 2);
+  if (Math.random() < 0.5) rect('#FC2020', 134, 176, 2, 2);
+  if (lockT > 60 && Math.floor(frame / 30) % 2 === 0) drawTextC('ENTER = TENTAR A FASE DE NOVO', 200, '#FCB800');
+}
+
+function drawWin() {
+  for (let y = 0; y < H; y += 8) rect(y < 100 ? '#0A1840' : '#1A3C78', 0, y, W, 8);
+  rect('#E8E8C8', 200, 30, 18, 18);
+  rect('#0C2A5C', 0, 120, W, 120);
+  for (let i = 0; i < 12; i++) rect('#1A4A8C', (i * 41 + frame) % W, 130 + (i * 17) % 100, 8, 1);
+  rect('#000', 108, 130, 40, 20); rect('#7C4C20', 110, 132, 36, 16); rect('#A8682C', 110, 132, 36, 3);
+  rect('#FCD060', 114, 138, 4, 4); rect('#FCD060', 138, 138, 4, 4);
+  camI = camJ = 0; drawCounselor(128, 142, 0, false, 0);
+  panel(24, 22, 208, 86);
+  drawTextC('VOCE SOBREVIVEU!', 32, '#40F060', 2);
+  drawTextC('AS 5 NOITES TERMINARAM.', 54, '#FCFCFC');
+  drawTextC('O AMANHECER CHEGA... MAS SERA', 66, '#B0B0B8');
+  drawTextC('QUE ELE REALMENTE FICOU PARA TRAS?', 78, '#B0B0B8');
+  drawTextC('PONTOS ' + String(score).padStart(6, '0') + '  RECORDE ' + String(hiScore).padStart(6, '0'), 94, '#FCB800');
+  if (lockT > 90 && Math.floor(frame / 30) % 2 === 0) drawTextC('ENTER = VOLTAR AO TITULO', 200, '#FCB800');
+}
+
+function render() {
+  ctx.imageSmoothingEnabled = false;
+  switch (state) {
+    case 'title': drawTitle(); break;
+    case 'intro': drawIntro(); break;
+    case 'play':
+      drawWorld(); drawDarkness(); drawStatic(); drawHUD(); drawPrompts(); drawLightButton();
+      if (flash > 0) { ctx.fillStyle = flashCol; ctx.globalAlpha = Math.min(0.7, flash / 16); ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
+      if (P.dead) { ctx.fillStyle = 'rgba(0,0,0,' + Math.min(0.9, endT / 100) + ')'; ctx.fillRect(0, 0, W, H); }
+      if (paused) { panel(88, 100, 80, 32); drawTextC('PAUSA', 111, '#FCFCFC', 2); }
+      break;
+    case 'levelup': drawLevelUp(); break;
+    case 'gameover': drawGameOver(); break;
+    case 'win': drawWin(); break;
+    default: break;
+  }
+}
+
+
+/* ========================== 11. LAÇO PRINCIPAL ============================ */
+let last = performance.now(), acc = 0;
+function loop(now) {
+  acc += Math.min(now - last, 100);
+  last = now;
+  while (acc >= STEP) { update(); acc -= STEP; }
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// Hook usado apenas por testes automatizados
+window.__game = {
+  update, render, keys, P, onAction, getState: () => state,
+  start(l) { score = 0; level = l; P.hp = START_HP; beginLevel(); },
+  get killers() { return killers; }, get structs() { return structs; }, get pickups() { return pickups; },
+  get grid() { return grid; }, get EXIT() { return EXIT; }, get GEN() { return GEN; }, get LV() { return LV; },
+  get level() { return level; }, set fusesHeld(n) { fusesHeld = n; }, get fusesIn() { return fusesIn; },
+  get powered() { return powered; }, get walkList() { return walkList; }, get bushes() { return bushes; }, get score() { return score; },
+  get unlocked() { return unlocked; }, set unlocked(n) { unlocked = n; },
+  get mode() { return mode; }, set mode(m) { mode = m; }, get lights() { return mapLights; }, setState(x) { state = x; }
+};
+
+})();
+</script>
+</body>
+</html>
