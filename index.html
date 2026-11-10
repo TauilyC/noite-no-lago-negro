@@ -31,6 +31,9 @@
   #bL { right: calc(max(16px, env(safe-area-inset-right)) + 6px); bottom: calc(max(34px, env(safe-area-inset-bottom)) + 96px); width: 62px; height: 62px; font-size: 24px; }
   #bL.on { background: rgba(252,184,0,.45); border-color: #FCB800; }
   #bP { right: calc(max(16px, env(safe-area-inset-right)) + 80px); bottom: calc(max(18px, env(safe-area-inset-bottom)) + 96px); width: 42px; height: 42px; font-size: 16px; }
+  #bG { left: max(14px, env(safe-area-inset-left)); bottom: calc(max(18px, env(safe-area-inset-bottom)) + 140px); width: 40px; height: 40px; font-size: 18px; }
+  #bV { right: calc(max(16px, env(safe-area-inset-right)) + 182px); bottom: calc(max(18px, env(safe-area-inset-bottom)) + 96px); width: 42px; height: 42px; font-size: 14px; color: #D8B8F0; border-color: rgba(190,150,230,.7); }
+  #bC { right: calc(max(16px, env(safe-area-inset-right)) + 132px); bottom: calc(max(18px, env(safe-area-inset-bottom)) + 96px); width: 42px; height: 42px; font-size: 14px; color: #D8B8F0; border-color: rgba(190,150,230,.7); }
 </style>
 </head>
 <body>
@@ -41,6 +44,9 @@
   <div class="tb" id="bA" aria-label="Ação"><div>A<small>AGIR</small></div></div>
   <div class="tb" id="bL" aria-label="Lanterna">&#128294;</div>
   <div class="tb" id="bP" aria-label="Pausa">II</div>
+  <div class="tb" id="bC" aria-label="Ritual: Selo de Cinzas">C</div>
+  <div class="tb" id="bV" aria-label="Ritual: Visão Hermética">V</div>
+  <div class="tb" id="bG" aria-label="Grimório">&#128214;</div>
 </div>
 
 <script>
@@ -90,7 +96,7 @@ const LAMPS = [1.0, 0.85, 0.7, 0.6, 0.45];   // densidade de luzes por fase
 const LEVELS = [
   { name: 'ACAMPAMENTO PINHEIRO NEGRO', diff: 'FACIL', stars: 1, theme: 'forest', gen: 'outdoor', bottom: 'lake',
     exit: 'boat', fuses: 3, killers: 1, kSpeed: 0.80, kSight: 0.85, kHear: 0.80, drain: 0.006, batt: 9, hide: 24,
-    density: 0.15, tip: 'APAGUE A LANTERNA E ESCONDA-SE NOS ARBUSTOS.', way: 'FUJA DE BARCO' },
+    density: 0.15, tip: 'APAGUE A LUZ E ESCONDA-SE NOS ARBUSTOS.', way: 'FUJA DE BARCO' },
   { name: 'CEMITERIO DA COLINA', diff: 'NORMAL', stars: 2, theme: 'cemetery', gen: 'outdoor', bottom: 'fence',
     exit: 'gate', fuses: 3, killers: 1, kSpeed: 0.95, kSight: 1.00, kHear: 1.00, drain: 0.008, batt: 8, hide: 18,
     density: 0.13, tip: 'O PORTAO SO ABRE QUANDO A ENERGIA VOLTAR.', way: 'ABRA O PORTAO' },
@@ -156,7 +162,9 @@ const FONT = {
   '.': '...../...../...../...../...../.##../.##..', ',': '...../...../...../...../.##../..#../.#...',
   '?': '.###./#...#/....#/...#./..#../...../..#..', '/': '....#/....#/...#./..#../.#.../#..../#....',
   '=': '...../...../#####/...../#####/...../.....', '+': '...../..#../..#../#####/..#../..#../.....',
-  '<': '...#./..#../.#.../#..../.#.../..#../...#.', '>': '.#.../..#../...#./....#/...#./..#../.#...'
+  '<': '...#./..#../.#.../#..../.#.../..#../...#.', '>': '.#.../..#../...#./....#/...#./..#../.#...',
+  '(': '..#../.#.../#..../#..../#..../.#.../..#..', ')': '..#../...#./....#/....#/....#/...#./..#..',
+  "'": '..#../..#../...../...../...../...../.....', '^': '..#../.###./#.#.#/..#../..#../..#../.....'
 };
 const glyphCache = {};
 function glyph(ch, col) {
@@ -329,14 +337,26 @@ function menuNav(k) {
 window.addEventListener('keydown', (e) => {
   audio.init();
   const k = KEYMAP[e.code];
+  if (grim) {                                                        // grimório aberto: ele captura as teclas
+    e.preventDefault();
+    if (e.code === 'KeyG' || e.code === 'Escape' || e.code === 'Enter' || e.code === 'KeyZ' || e.code === 'Space') { if (!e.repeat) closeGrim(); }
+    else if (k) grimNav(k);
+    return;
+  }
   if (k) { e.preventDefault(); keys[k] = true; }
   if (e.repeat) return;
+  if (state === 'title' && e.code === 'KeyE') { toggleFx(); return; }
+  if (state === 'title' && e.code === 'KeyB') { toggleBright(); return; }
   if (state === 'title' && menuNav(k)) return;
   if (e.code === 'Enter' || k === 'act') onAction();
   if (e.code === 'KeyF' && state === 'play' && !paused) toggleLight();
+  if (e.code === 'KeyC' && state === 'play' && !paused) castRitual();
+  if (e.code === 'KeyV' && state === 'play' && !paused) castVision();
+  if (e.code === 'KeyG') openGrim();
   if (e.code === 'KeyP' || e.code === 'Escape') togglePause();
   if (e.code === 'KeyM') audio.setMuted(!audio.muted);
 });
+window.addEventListener('wheel', (e) => { if (grim) grimScroll(e.deltaY > 0 ? 1 : -1); }, { passive: true });
 window.addEventListener('keyup', (e) => { const k = KEYMAP[e.code]; if (k) { keys[k] = false; e.preventDefault(); } });
 function releaseKeys() { for (const k in keys) keys[k] = false; }
 window.addEventListener('blur', () => { releaseKeys(); autoPause(); });
@@ -358,7 +378,7 @@ function enableTouch() {
   let joyId = null;
   const setDir = (l, r, u, d) => {
     const nk = { left: l, right: r, up: u, down: d };
-    for (const k in nk) { if (nk[k] && !keys[k] && state === 'title') menuNav(k); keys[k] = nk[k]; }
+    for (const k in nk) { if (nk[k] && !keys[k]) { if (grim) grimNav(k); else if (state === 'title') menuNav(k); } keys[k] = nk[k]; }
   };
   const joyMove = (e) => {
     const b = joy.getBoundingClientRect(), R = b.width / 2;
@@ -390,10 +410,25 @@ function enableTouch() {
     const up = () => el.classList && el.classList.remove('down'); el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up); };
   tap('bL', () => { if (state === 'play' && !paused) toggleLight(); });
   tap('bP', () => togglePause());
+  tap('bC', () => { if (state === 'play' && !paused) castRitual(); });
+  tap('bV', () => { if (state === 'play' && !paused) castVision(); });
+  tap('bG', () => { if (grim) closeGrim(); else openGrim(); });
 
   // toque na tela: confirma menus; retoma o jogo se estiver pausado; 1º toque tenta tela cheia / paisagem
   let triedFS = false;
   canvas.addEventListener('pointerdown', (e) => {
+    if (grim) {                                                   // grimório: abas e rodapé são tocáveis
+      const r = canvas.getBoundingClientRect(), gx = (e.clientX - r.left) / r.width * W, gy = (e.clientY - r.top) / r.height * H;
+      if (gy >= 26 && gy < 42) { grim.tab = clamp(Math.floor((gx - 10) / 80), 0, 2); grim.scroll = 0; sfx.click(); }
+      else if (gy >= 202) closeGrim();
+      return;
+    }
+    if (state === 'title') {                                      // linhas de opções no título (tocáveis)
+      const r = canvas.getBoundingClientRect(), cy = (e.clientY - r.top) / r.height * H;
+      if (cy >= 220 && cy < 234) { openGrim(); return; }
+      if (cy >= 198 && cy < 209) { toggleFx(); return; }
+      if (cy >= 209 && cy < 220) { toggleBright(); return; }
+    }
     if (!TOUCH) return;
     if (!triedFS && state === 'title') {
       triedFS = true;
@@ -428,7 +463,7 @@ let grid = new Uint8Array(MW * MH);
 let structs = [];       // locais de busca: {kind:'cabin'|'prop', ix,iy,r,item,searched,...}
 let propAt = new Map(); // idx do tile -> struct (armários/caixotes)
 let bushes = new Set(); // esconderijos (arbusto, junco, cortina, barril...)
-let pickups = [];       // pilhas no chão
+let pickups = [];       // pilhas no chão (o fragmento de diário fica em `frag`)
 let walkList = [];      // tiles alcançáveis a partir do início
 let mapLights = [];     // luzes fixas {x,y,r}
 let gateTiles = [];     // tiles que abrem quando a energia volta
@@ -475,7 +510,7 @@ function adjReach(reach, tx, ty, w, h) {
 }
 
 const set = (x, y, t) => { if (inB(x, y)) grid[idx(x, y)] = t; };
-function resetMapData() { grid = new Uint8Array(MW * MH); structs = []; propAt = new Map(); bushes = new Set(); pickups = []; mapLights = []; gateTiles = []; }
+function resetMapData() { grid = new Uint8Array(MW * MH); structs = []; propAt = new Map(); bushes = new Set(); pickups = []; mapLights = []; gateTiles = []; frag = null; }
 
 // ---- Fases 1-3: ao ar livre (acampamento, cemitério, pântano) ----
 const CABIN_POS = [[8, 8], [34, 8], [17, 6], [6, 26], [34, 26], [17, 30]];
@@ -676,7 +711,7 @@ function genMine() {
 }
 
 /** Confere se tudo é alcançável e distribui esconderijos e pilhas. */
-const LIGHT_R = { post: 56, fire: 62, candle: 28, wisp: 32, wall: 48, emerg: 38, torch: 44, window: 34 };
+const LIGHT_R = { post: 56, fire: 62, candle: 28, wisp: 32, wall: 48, emerg: 38, torch: 44, window: 34, frag: 34 };
 function addLight(kind, tx, ty, r, oy = 0) {
   mapLights.push({ kind, x: tx * TS + 8, y: ty * TS + 8 + oy, r, ph: Math.random() * 6.28, tx, ty });
 }
@@ -749,6 +784,12 @@ function finalizeMap() {
     if (Math.hypot(x - START.x, y - START.y) < 120) continue;
     pickups.push({ x, y, got: false }); placed++;
   }
+  if (!frags.has(level)) {                                   // fragmento de diário da Ordem (um por fase, até ser achado)
+    const cand = spots.filter(i => !bushes.has(i) && Math.hypot((i % MW) * TS + 8 - START.x, ((i / MW) | 0) * TS + 8 - START.y) > 220 &&
+      !pickups.some(p => Math.hypot(p.x - ((i % MW) * TS + 8), p.y - (((i / MW) | 0) * TS + 8)) < 24));
+    const i = cand.length ? cand[rnd(cand.length)] : spots[spots.length - 1];
+    if (i !== undefined) frag = { x: (i % MW) * TS + 8, y: ((i / MW) | 0) * TS + 8, tx: i % MW, ty: (i / MW) | 0, got: false, level };
+  }
   return true;
 }
 
@@ -756,7 +797,7 @@ function genMap() {
   for (let attempt = 0; attempt < 120; attempt++) {
     resetMapData();
     const ok = LV.gen === 'outdoor' ? genOutdoor() : LV.gen === 'hospital' ? genHospital() : genMine();
-    if (ok && finalizeMap()) { placeLights(); return; }
+    if (ok && finalizeMap()) { placeLights(); if (frag) addLight('frag', frag.tx, frag.ty, LIGHT_R.frag); return; }
   }
   throw new Error('Nao foi possivel gerar o mapa');
 }
@@ -802,17 +843,55 @@ let paused = false, frame = 0, lockT = 0, introT = 0, playFrames = 0;
 let camX = 0, camY = 0, camI = 0, camJ = 0;
 let level = 0, startLevel = 0, unlocked = 1;
 let fusesHeld = 0, fusesIn = 0, powered = false;
+// Progressão ocultista híbrida: conhecimento, estabilidade e cargas de ritual.
+let occultXP = 0, occultRank = 1, sigils = 0, ritualT = 0, ritualFlash = 0, visionT = 0;
+let occultSnap = { xp: 0, rank: 1, sigils: 1 };   // estado no início da fase: usado ao tentar de novo após morrer
+const rankFor = (xp) => (xp >= 180 ? 3 : xp >= 70 ? 2 : 1);
 let flash = 0, flashCol = '#FCFCFC', shake = 0;
 let messages = [];
 let endT = 0;
 let score = 0, levelStartScore = 0, hiScore = 0, lastBonus = null;
+const CODEX = [
+  { id: 'sim_selo', sec: 'SIM', title: 'SIGILO: SELO DE CINZAS', hint: '', text: 'Circulo de cinza com tres riscos. Fecha o ar ao redor de quem o traca e afasta o que caca.' },
+  { id: 'sim_olho', sec: 'SIM', title: 'SIGILO: OLHO ABERTO', hint: 'ACHE SIGILOS ANTIGOS', text: 'Percepcao. Gravado em portas e caixotes da Ordem. Onde ha olho, ha algo escondido.' },
+  { id: 'sim_ouro', sec: 'SIM', title: 'SIGILO: OUROBORO', hint: 'ACHE SIGILOS ANTIGOS', text: 'A serpente que se morde. O ciclo: o que sai, volta. Marca os lugares da Grande Obra.' },
+  { id: 'sim_chave', sec: 'SIM', title: 'SIGILO: CHAVE DE TRES DENTES', hint: 'ACHE SIGILOS ANTIGOS', text: 'Corpo, nome e sombra. A Ordem acreditava que os tres, juntos, abrem qualquer porta.' },
+  { id: 'sim_lua', sec: 'SIM', title: 'SIGILO: LUA NEGRA', hint: 'ALCANCE O GRAU 3', text: 'A noite sem lua em que o lago respira. So se mostra a quem ja alcancou o terceiro grau.' },
+  { id: 'tr0', sec: 'TRA', title: 'HERMETISMO', hint: 'CHEGUE A FASE 1', text: 'O que esta em cima e como o que esta embaixo. A Ordem leu o lago como espelho do ceu e acampou na margem para observa-lo.' },
+  { id: 'tr1', sec: 'TRA', title: 'SIMBOLISMO FUNERARIO', hint: 'CHEGUE A FASE 2', text: 'As criptas guardam nomes, nao corpos. Para a Ordem, morrer era o primeiro grau da obra: deixar o que se era na entrada.' },
+  { id: 'tr2', sec: 'TRA', title: 'ALQUIMIA', hint: 'CHEGUE A FASE 3', text: 'Nigredo, albedo, rubedo. A obra comeca no negro, onde tudo se dissolve. O pantano era o forno lento da Ordem.' },
+  { id: 'tr3', sec: 'TRA', title: 'GRIMORIOS E DEMONOLOGIA', hint: 'CHEGUE A FASE 4', text: 'Cada entidade tem um nome e um preco. No sanatorio, os iniciados copiavam formulas enquanto os pacientes as sonhavam.' },
+  { id: 'tr4', sec: 'TRA', title: 'HORROR COSMICO', hint: 'CHEGUE A FASE 5', text: 'Abaixo da mina o lago nao tem fundo nem margem. O que habita ali nao odeia nem deseja. Apenas responde.' },
+  { id: 'ent_ceifador', sec: 'ENT', title: 'O CEIFADOR', hint: 'SEJA VISTO POR ELE', text: 'Reflexo de um iniciado. Ve mais longe se a lanterna esta acesa e ouve quem corre. O Selo de Cinzas o afasta, mas ele volta.' },
+  { id: 'ent_segundo', sec: 'ENT', title: 'O SEGUNDO CEIFADOR', hint: 'SEJA VISTO POR ELE (FASE 5)', text: 'Sobretudo roxo e olhos de brasa. Caca junto com o primeiro. Nao confie no silencio: ele espera.' },
+  { id: 'ent_guardiao', sec: 'ENT', title: 'O GUARDIAO DO LAGO', hint: 'REUNA OS 5 FRAGMENTOS', text: 'O que o espelho guarda. Ninguem o viu e voltou igual. So o saber completo mantem a porta fechada.' }
+];
+const FRAG_SITES = ['ACAMPAMENTO', 'CEMITERIO', 'PANTANO', 'SANATORIO', 'MINA'];
+const FRAG_TEXT = [
+  'Diario de um monitor: eles chegaram no outono com um bau de chumbo e um mapa do lago. Chamavam-se Ordem do Espelho Negro. Pagaram o aluguel adiantado.',
+  'Na cripta, uma placa sem nome: aqui se deixa o que se era. O primeiro passo da obra e morrer para o mundo. O negro vem antes do branco.',
+  'Anotacao molhada: o lago nao enche com chuva. Enche com o que lhe dao. Dissolveram nomes, depois ossos, depois promessas.',
+  'Ficha 13: pacientes que ouviam o lago. A Ordem copiava o que eles diziam dormindo. Todos desenhavam a mesma porta, vista por dentro.',
+  'Ultima pagina: nao abrimos uma porta. Abrimos um espelho. O que sai de la e o que vimos quando olhamos. Ele nao nos odeia. Ele nos imita.'
+];
+const FRAG_TRUTH = 'O Lago Negro nao leva a lugar nenhum. Ele reflete. Os Ceifadores sao os antigos iniciados: reflexos que aprenderam a cacar. Os sigilos nao abrem a porta, eles a mantem fechada.';
+let codex = new Set(['sim_selo']), frags = new Set(), grimNew = false, grim = null;   // grimório: registros, fragmentos, novidade, tela aberta
+let frag = null;                                                                       // fragmento de diário da fase atual
+let reduceFx = false, bright = 0, lastFlashF = -999;   // acessibilidade: efeitos reduzidos e brilho da escuridão
+const BRIGHT = [{ name: 'NORMAL', k: 1 }, { name: 'CLARO', k: 0.75 }, { name: 'MAIS CLARO', k: 0.5 }];
 
 try {
   unlocked = clamp(parseInt(localStorage.getItem('nln_unlocked') || '1', 10) || 1, 1, LEVELS.length);
   hiScore = parseInt(localStorage.getItem('nln_hi') || '0', 10) || 0;
   mode = clamp(parseInt(localStorage.getItem('nln_mode') || '0', 10) || 0, 0, MODES.length - 1);
+  const fx = localStorage.getItem('nln_fx');
+  reduceFx = fx === null ? !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) : fx === '1';
+  bright = clamp(parseInt(localStorage.getItem('nln_br') || '0', 10) || 0, 0, BRIGHT.length - 1);
+  const okIds = new Set(CODEX.map(e => e.id));
+  JSON.parse(localStorage.getItem('nln_codex') || '[]').forEach(id => { if (okIds.has(id)) codex.add(id); });
+  JSON.parse(localStorage.getItem('nln_frags') || '[]').forEach(n => { if (n >= 0 && n < 5) frags.add(n); });
 } catch (e) { /* sem storage */ }
-function saveProgress() { try { localStorage.setItem('nln_unlocked', String(unlocked)); localStorage.setItem('nln_hi', String(hiScore)); localStorage.setItem('nln_mode', String(mode)); } catch (e) { /* ignora */ } }
+function saveProgress() { try { localStorage.setItem('nln_unlocked', String(unlocked)); localStorage.setItem('nln_hi', String(hiScore)); localStorage.setItem('nln_mode', String(mode)); localStorage.setItem('nln_fx', reduceFx ? '1' : '0'); localStorage.setItem('nln_br', String(bright)); localStorage.setItem('nln_codex', JSON.stringify([...codex])); localStorage.setItem('nln_frags', JSON.stringify([...frags])); } catch (e) { /* ignora */ } }
 
 const P = {
   x: 0, y: 0, r: 4, fx: 0, fy: 1, moving: false, sprint: false,
@@ -825,7 +904,13 @@ function makeKiller(variant) {
            face: 1, fy: 1, anim: 0, variant, field: { key: -1, dist: new Int16Array(MW * MH) } };
 }
 
-function msg(text, t = 170) { messages = [{ text, t }]; }
+let msgQ = [];
+/** Mensagem na tela. pri 2 = crítica (não é apagada), 1 = importante (espera a vez), 0 = informativa (some se houver algo mais importante). */
+function msg(text, t = 170, pri = 0) {
+  const cur = messages[0];
+  if (cur && cur.t > 0 && cur.pri > pri) { if (pri >= 1 && msgQ.length < 3) msgQ.push({ text, t, pri }); return; }
+  messages = [{ text, t, pri }];
+}
 function toggleLight() {
   if (P.dead) return;
   if (P.battery > 0) {
@@ -834,9 +919,63 @@ function toggleLight() {
   } else sfx.empty();
 }
 
+/** Conhecimento oculto não é magia gratuita: cada rito consome um sigilo encontrado. */
+function gainOccult(n, source) {
+  occultXP += n;
+  const next = rankFor(occultXP);
+  if (next > occultRank) {
+    occultRank = next; sigils = Math.min(3, sigils + 1); sfx.power();
+    if (occultRank >= 3) discover('sim_lua');
+    msg(occultRank === 2 ? 'GRAU 2! NOVO RITO: VISAO (V)' : 'SABER PROIBIDO. GRAU ' + occultRank + ' ALCANCADO.', 220, 2);
+  }
+}
+function castRitual() {
+  if (state !== 'play' || paused || P.dead) return;
+  if (sigils <= 0) { msg('SEM SIGILOS. INVESTIGUE OS VESTIGIOS.'); sfx.empty(); return; }
+  sigils--; ritualT = occultRank >= 3 ? 210 : occultRank >= 2 ? 170 : 135;
+  ritualFlash = 18;
+  // O selo repele temporariamente as presenças próximas; não as elimina.
+  let repelled = 0;
+  for (const k of killers) {
+    const d = Math.hypot(k.x - P.x, k.y - P.y);
+    if (d < (occultRank >= 3 ? 175 : 145)) { k.stun = Math.max(k.stun, ritualT); k.rit = true; k.state = 'patrol'; k.last = null; repelled++; }
+  }
+  P.inv = Math.max(P.inv, 45);
+  sfx.power(); shake = 5;
+  msg(repelled ? 'SELO DE CINZAS! A PRESENCA RECUA.' : 'SELO DE CINZAS! O AR SE FECHA.', 150, 1);
+}
+
+/** Visão Hermética (grau 2+): consome um sigilo e revela, por um tempo, onde estão os fusíveis ainda não achados. */
+function castVision() {
+  if (state !== 'play' || paused || P.dead) return;
+  if (occultRank < 2) { msg('GRAU 2 NECESSARIO PARA A VISAO.'); sfx.empty(); return; }
+  if (sigils <= 0) { msg('SEM SIGILOS. INVESTIGUE OS VESTIGIOS.'); sfx.empty(); return; }
+  if (structs.every(s => s.searched || s.item !== 'fuse')) { msg('NAO HA MAIS FUSIVEIS A REVELAR.'); return; }
+  sigils--; visionT = occultRank >= 3 ? 900 : 600;
+  ritualFlash = 14; sfx.fuse();
+  msg('VISAO HERMETICA! OS FUSIVEIS BRILHAM.', 150, 1);
+}
+/** Marcadores roxos nos fusíveis restantes; nas bordas da tela quando estão fora de vista. */
+function drawVision() {
+  if (visionT <= 0) return;
+  const pulse = Math.floor(frame / 8) % 2, fade = visionT < 90 && Math.floor(frame / 5) % 2;
+  if (fade) return;
+  for (const s of structs) {
+    if (s.searched || s.item !== 'fuse') continue;
+    let x = Math.round(s.ix - camI), y = Math.round(s.iy - camJ - 6), edge = false;
+    if (x < 8 || x > W - 8 || y < 30 || y > H - 30) { x = clamp(x, 8, W - 8); y = clamp(y, 30, H - 30); edge = true; }
+    const r = edge ? 3 : 4 + pulse;
+    rect('#000', x - r - 1, y - 1, r * 2 + 3, 3); rect('#000', x - 1, y - r - 1, 3, r * 2 + 3);
+    rect('#C9A7E8', x - r, y, r * 2 + 1, 1); rect('#C9A7E8', x, y - r, 1, r * 2 + 1);
+    rect('#FCFCFC', x, y, 1, 1);
+  }
+}
+
 /** Prepara e inicia a fase `level` (mapa novo, vilões novos). */
 function beginLevel() {
   LV = LEVELS[level];
+  occultSnap = { xp: occultXP, rank: occultRank, sigils };
+  visionT = 0;
   genMap();
   fusesHeld = 0; fusesIn = 0; powered = false; playFrames = 0;
   Object.assign(P, { x: START.x, y: START.y, fx: 0, fy: 1, stamina: 100, tired: false, battery: 100,
@@ -855,7 +994,7 @@ function beginLevel() {
     pickWaypoint(k);
   }
   camX = clamp(P.x - W / 2, 0, MW * TS - W); camY = clamp(P.y - H / 2, 0, MH * TS - H);
-  messages = []; flash = 0; shake = 0; endT = 0; paused = false; fear = 0; chasing = false;
+  messages = []; msgQ = []; flash = 0; shake = 0; endT = 0; paused = false; fear = 0; chasing = false;
   levelStartScore = score;
   state = 'intro'; introT = 0; lockT = 0;
   ambient.stop();
@@ -863,16 +1002,118 @@ function beginLevel() {
 }
 
 function onAction() {
-  if (state === 'title') { score = 0; level = startLevel; P.hp = START_HP; beginLevel(); }
+  if (grim) { closeGrim(); return; }
+  if (state === 'title') {
+    score = 0; level = startLevel; P.hp = START_HP; ritualT = 0; ritualFlash = 0;
+    occultXP = startLevel * 45; occultRank = rankFor(occultXP); sigils = Math.min(3, occultRank);   // quem começa numa fase avançada já tem algum saber
+    beginLevel();
+  }
   else if (state === 'intro' && introT > 40) {
     state = 'play';
     ambient.start(LV.theme, [55, 49, 46, 41, 36][level]);
-    msg('ACHE ' + LV.fuses + ' FUSIVEIS');
+    msg('ACHE ' + LV.fuses + ' FUSIVEIS', 170, 1);
+    discover('tr' + level);
   }
   else if (state === 'levelup' && lockT > 60) { level++; P.hp = Math.min(START_HP, P.hp + 1); beginLevel(); }
-  else if (state === 'gameover' && lockT > 60) { score = levelStartScore; P.hp = START_HP; beginLevel(); }
+  else if (state === 'gameover' && lockT > 60) {
+    score = levelStartScore; P.hp = START_HP;
+    occultXP = occultSnap.xp; occultRank = occultSnap.rank; sigils = occultSnap.sigils;   // o que se ganhou na tentativa falha se perde
+    beginLevel();
+  }
   else if (state === 'win' && lockT > 90) { state = 'title'; startLevel = 0; }
 }
+function discover(id) { if (codex.has(id)) return; codex.add(id); grimNew = true; saveProgress(); }
+function discoverSymbol() { for (const id of ['sim_olho', 'sim_ouro', 'sim_chave']) if (!codex.has(id)) { discover(id); return; } }
+function wrapText(str, n) {
+  const words = String(str).toUpperCase().split(' '), out = []; let cur = '';
+  for (const w of words) { if ((cur + ' ' + w).trim().length > n) { out.push(cur); cur = w; } else cur = (cur + ' ' + w).trim(); }
+  if (cur) out.push(cur);
+  return out;
+}
+function openGrim() {
+  if (grim) return;
+  const okState = state === 'title' || state === 'levelup' || state === 'gameover' || state === 'win' || (state === 'play' && !P.dead);
+  if (!okState) return;
+  grim = { tab: 0, scroll: 0, hold: 0, pausedBy: false };
+  if (state === 'play' && !paused) { togglePause(); grim.pausedBy = true; }
+  grimNew = false; releaseKeys(); sfx.click();
+}
+function closeGrim() {
+  if (!grim) return;
+  if (grim.pausedBy && paused) togglePause();
+  grim = null; releaseKeys(); sfx.click();
+}
+function grimLines(tab) {
+  const out = [], P0 = '#C9A7E8', Y = '#FCB800', G = '#B0B0B8', D = '#585868';
+  const add = (str, c) => wrapText(str, 37).forEach(t => out.push({ t, c }));
+  const sp = () => out.push({ t: '', c: G });
+  if (tab === 0) {
+    for (const [sec, name] of [['SIM', 'SIMBOLOS'], ['TRA', 'TRADICOES'], ['ENT', 'ENTIDADES']]) {
+      out.push({ t: '- ' + name + ' -', c: P0 });
+      for (const e of CODEX) if (e.sec === sec) {
+        if (codex.has(e.id)) { out.push({ t: e.title, c: Y }); add(e.text, G); } else out.push({ t: '??? ' + e.hint, c: D });
+        sp();
+      }
+    }
+  } else if (tab === 1) {
+    const secs = (occultRank >= 3 ? 210 : occultRank >= 2 ? 170 : 135) / 60, range = occultRank >= 3 ? 175 : 145;
+    out.push({ t: 'SEU GRAU: ' + occultRank + '   SABER: ' + occultXP, c: P0 });
+    out.push({ t: 'SIGILOS: ' + sigils + '/3', c: P0 });
+    add('Grau 2 com 70 de saber, grau 3 com 180. Saber vem de fusiveis (+12), sigilos (+18) e gerador (+15).', G); sp();
+    out.push({ t: (TOUCH ? 'BOTAO C' : 'C') + ' - SELO DE CINZAS', c: '#FCB800' });
+    add('Custa 1 sigilo. Atordoa e afasta os Ceifadores a ate ' + range + ' px por ' + secs.toFixed(1).replace('.', ',') + ' s. Eles voltam depois.', G); sp();
+    if (occultRank >= 2) {
+      out.push({ t: (TOUCH ? 'BOTAO V' : 'V') + ' - VISAO HERMETICA', c: '#FCB800' });
+      add('Custa 1 sigilo. Revela os fusiveis ainda nao achados por ' + (occultRank >= 3 ? 15 : 10) + ' s.', G);
+    } else out.push({ t: '??? REQUER O GRAU 2', c: D });
+    sp();
+    add('Sigilos antigos aparecem em cerca de 1 de cada 3 buscas em caixotes e cabines.', D);
+  } else {
+    out.push({ t: 'FRAGMENTOS: ' + frags.size + '/5', c: P0 }); sp();
+    for (let i = 0; i < 5; i++) {
+      if (frags.has(i)) { out.push({ t: 'FRAGMENTO ' + (i + 1) + ': ' + FRAG_SITES[i], c: '#FCB800' }); add(FRAG_TEXT[i], G); }
+      else out.push({ t: '??? PROCURE NA FASE ' + (i + 1) + ' (' + FRAG_SITES[i] + ')', c: D });
+      sp();
+    }
+    out.push({ t: '- A VERDADE -', c: P0 });
+    if (frags.size >= 5) add(FRAG_TRUTH, '#E8D8FF'); else out.push({ t: '??? REUNA OS 5 FRAGMENTOS', c: D });
+  }
+  return out;
+}
+function grimScroll(d) {
+  const max = Math.max(0, grimLines(grim.tab).length - 14);
+  grim.scroll = clamp(grim.scroll + d, 0, max);
+}
+function grimNav(k) {
+  if (!grim) return;
+  if (k === 'left' || k === 'right') { grim.tab = (grim.tab + (k === 'right' ? 1 : 2)) % 3; grim.scroll = 0; sfx.click(); }
+  else if (k === 'up') grimScroll(-1);
+  else if (k === 'down') grimScroll(1);
+}
+function grimTick() {                                   // rolagem contínua ao segurar (joystick)
+  if (keys.up || keys.down) { grim.hold++; if (grim.hold > 16 && grim.hold % 4 === 0) grimScroll(keys.down ? 1 : -1); } else grim.hold = 0;
+}
+function drawGrimoire() {
+  ctx.fillStyle = 'rgba(0,0,0,0.9)'; ctx.fillRect(0, 0, W, H);
+  panel(6, 4, 244, 232);
+  drawTextC('GRIMORIO', 9, '#C9A7E8', 2);
+  ['SABER', 'RITUAIS', 'MISTERIOS'].forEach((t, i) => {
+    const x = 10 + i * 80, on = i === grim.tab;
+    rect(on ? '#4A3470' : '#1C1C28', x, 28, 78, 12); rect(on ? '#C9A7E8' : '#383848', x, 39, 78, 1);
+    drawText(t, x + Math.round((78 - t.length * 6) / 2), 31, on ? '#FCFCFC' : '#707088', 1, false);
+  });
+  const lines = grimLines(grim.tab), VIS = 14;
+  grim.scroll = clamp(grim.scroll, 0, Math.max(0, lines.length - VIS));
+  for (let i = 0; i < VIS; i++) { const l = lines[grim.scroll + i]; if (l && l.t) drawText(l.t, 14, 46 + i * 11, l.c, 1, false); }
+  if (grim.scroll > 0) drawText('^', 240, 46, '#FCB800', 1, false);
+  if (grim.scroll + VIS < lines.length) drawText('v', 240, 46 + 13 * 11, '#FCB800', 1, false);
+  rect('#383848', 10, 202, 236, 1);
+  drawText('SABER ' + codex.size + '/' + CODEX.length + '  FRAGMENTOS ' + frags.size + '/5', 14, 207, '#C9A7E8', 1, false);
+  drawText(TOUCH ? 'JOYSTICK: ABA/ROLAR   A: FECHAR' : 'SETAS: ABA/ROLAR   G: FECHAR', 14, 219, '#B0B0B8', 1, false);
+}
+
+function toggleFx() { reduceFx = !reduceFx; saveProgress(); sfx.click(); }
+function toggleBright() { bright = (bright + 1) % BRIGHT.length; saveProgress(); sfx.click(); }
 function togglePause() {
   if (state !== 'play' || P.dead) return;
   paused = !paused;
@@ -912,6 +1153,11 @@ function updatePlayer() {
     if (!p.got && Math.hypot(p.x - P.x, p.y - P.y) < 9) {
       p.got = true; P.battery = Math.min(100, P.battery + 55); sfx.pickup(); msg('PILHA NOVA!', 100);
     }
+  }
+  if (frag && !frag.got && Math.hypot(frag.x - P.x, frag.y - P.y) < 10) {       // fragmento de diário
+    frag.got = true; frags.add(frag.level); grimNew = true; saveProgress(); sfx.fuse();
+    if (frags.size >= 5) { discover('ent_guardiao'); msg('O SEGREDO DO LAGO SE REVELA! ABRA O GRIMORIO.', 280, 2); }
+    else msg('FRAGMENTO ' + frags.size + '/5 ENCONTRADO!', 220, 1);
   }
   if (P.inv > 0) P.inv--;
 }
@@ -963,12 +1209,13 @@ function killerStep(k, speed) {
 function updateKiller(k) {
   if (k.stun > 0) {                                        // atordoado após atacar
     if (--k.stun === 0) {                                  // some e reaparece longe
+      k.rit = false;
       const far = walkList.filter(i => Math.hypot((i % MW) * TS + 8 - P.x, ((i / MW) | 0) * TS + 8 - P.y) > 260);
       const s = far.length ? far[rnd(far.length)] : walkList[rnd(walkList.length)];
       k.x = (s % MW) * TS + 8; k.y = ((s / MW) | 0) * TS + 8;
       k.state = 'patrol'; k.lost = 0; pickWaypoint(k);
     }
-    return 1;
+    return k.rit ? 0 : 1;                                  // atordoado pelo ritual: alívio, não pânico
   }
   const dx = P.x - k.x, dy = P.y - k.y, d = Math.hypot(dx, dy);
   const los = hasLOS(k.x, k.y, P.x, P.y);
@@ -977,7 +1224,7 @@ function updateKiller(k) {
   const sees = los && !P.dead && d < (P.hidden ? 22 : sightR);
 
   if (sees) {
-    if (k.state !== 'chase') { sfx.spot(); flash = 14; flashCol = '#FCFCFC'; }
+    if (k.state !== 'chase') { sfx.spot(); discover(k.variant ? 'ent_segundo' : 'ent_ceifador'); if (frame - lastFlashF > 45) { flash = 14; flashCol = '#FCFCFC'; lastFlashF = frame; } }
     k.state = 'chase'; k.lost = 0; k.last = { x: P.x, y: P.y };
   } else if (k.state === 'chase') {
     k.lost++;
@@ -1023,7 +1270,7 @@ function hurtPlayer(k) {
   P.prog = 0;
   sfx.hurt();
   if (P.hp <= 0) { P.dead = true; endT = 0; ambient.stop(); }
-  else msg(P.hp === 1 ? 'ULTIMA CHANCE!' : 'ELE TE PEGOU! CORRA!');
+  else msg(P.hp === 1 ? 'ULTIMA CHANCE!' : 'ELE TE PEGOU! CORRA!', 150, 1);
 }
 
 
@@ -1054,15 +1301,20 @@ function updateInteractions() {
 function completeAction(a) {
   if (a.kind === 'search') {
     a.s.searched = true;
-    if (a.s.item === 'fuse') { fusesHeld++; sfx.fuse(); msg('ACHOU UM FUSIVEL! (' + (fusesHeld + fusesIn) + '/' + LV.fuses + ')'); }
-    else { P.battery = Math.min(100, P.battery + 45); sfx.pickup(); msg('ACHOU UMA PILHA!'); }
+    if (a.s.item === 'fuse') { fusesHeld++; gainOccult(12, 'fuse'); sfx.fuse(); msg('ACHOU UM FUSIVEL! (' + (fusesHeld + fusesIn) + '/' + LV.fuses + ')', 170, 1); }
+    else {
+      P.battery = Math.min(100, P.battery + 45); sfx.pickup();
+      // Vestígios ocultistas são raros e coexistem com os recursos originais.
+      if (Math.random() < 0.34) { sigils = Math.min(3, sigils + 1); gainOccult(18, 'relic'); discoverSymbol(); msg('ENCONTROU UM SIGILO ANTIGO. CARGAS: ' + sigils, 170, 1); }
+      else msg('ACHOU UMA PILHA!');
+    }
   } else if (a.kind === 'gen') {
     if (fusesHeld === 0) { sfx.empty(); msg('TRAGA OS FUSIVEIS (' + fusesIn + '/' + LV.fuses + ')'); return; }
-    fusesIn += fusesHeld; fusesHeld = 0; sfx.fuse();
+    fusesIn += fusesHeld; fusesHeld = 0; gainOccult(15, 'generator'); sfx.fuse();
     if (fusesIn >= LV.fuses) {
       powered = true; openGates(); sfx.power(); shake = 14;
-      msg('ENERGIA LIGADA! ' + LV.way + '!', 260);
-    } else msg('FUSIVEL COLOCADO (' + fusesIn + '/' + LV.fuses + ')... ELE FICOU MAIS RAPIDO');
+      msg('ENERGIA LIGADA! ' + LV.way + '!', 260, 2);
+    } else msg('FUSIVEL COLOCADO (' + fusesIn + '/' + LV.fuses + ')... ELE FICOU MAIS RAPIDO', 200, 1);
   }
 }
 
@@ -1096,11 +1348,16 @@ function update() {
   if (flash > 0) flash--;
   if (state === 'intro') introT++;
   if (state === 'gameover' || state === 'win' || state === 'levelup') lockT++;
+  if (grim) grimTick();
   if (state !== 'play' || paused) return;
   playFrames++;
+  if (ritualT > 0) ritualT--;
+  if (visionT > 0) visionT--;
+  if (ritualFlash > 0) ritualFlash--;
 
   for (const m of messages) m.t--;
   messages = messages.filter(m => m.t > 0);
+  if (!messages.length && msgQ.length) messages = [msgQ.shift()];
 
   if (!P.dead) { updatePlayer(); updateInteractions(); }
   else { endT++; if (endT > 100) failLevel(); }
@@ -1281,6 +1538,12 @@ function drawGenerator() {
 }
 
 // ---------- SAÍDAS ----------
+/** Lâmpada da saída: acesa = verde com miolo claro; apagada = vermelha com traço (legível sem distinguir cores). */
+function exitLamp(x, y, sz, pw) {
+  wr(pw ? '#40F060' : '#D82800', x, y, sz, sz);
+  if (pw) wr('#FCFCFC', x + 1, y + 1, sz - 2, sz - 2);
+  else for (let i = 0; i < sz; i++) wr('#000', x + i, y + i, 1, 1);
+}
 function drawExit() {
   const e = EXIT, x = e.x, y = e.y, pw = powered;
   if (e.style === 'boat') {
@@ -1288,7 +1551,7 @@ function drawExit() {
     wr('#000', bx - 4, by + 4, 40, 28);
     wr('#7C4C20', bx - 3, by + 5, 38, 26); wr('#A8682C', bx - 3, by + 5, 38, 3);
     wr('#4A2C10', bx - 3, by + 28, 38, 3); wr('#4A2C10', bx + 15, by + 8, 2, 20);
-    wr(pw ? '#40F060' : '#601010', bx + 14, by + 10, 4, 4);
+    exitLamp(bx + 14, by + 10, 4, pw);
     if (pw) { wr('#FCD060', bx + 2, by + 12, 3, 3); wr('#FCD060', bx + 27, by + 12, 3, 3); }
   } else if (e.style === 'gate') {                            // portão de ferro do cemitério
     wr('#6A6A7C', x - 8, y - 12, 8, 28); wr('#8A8A9C', x - 8, y - 12, 8, 3);
@@ -1300,7 +1563,7 @@ function drawExit() {
       wr('#3A3A4E', x + 17 + i * 4 + open, y, 2, 16);
     }
     if (!pw) wr('#B0A060', x + 12, y + 6, 8, 3);
-    wr(pw ? '#40F060' : '#D82800', x + 15, y - 8, 3, 3);
+    exitLamp(x + 15, y - 8, 3, pw);
   } else if (e.style === 'door') {                            // porta dupla com placa SAÍDA
     wr('#10301C', x, y - 13, 32, 10); drawText('SAIDA', x + 1 - camI, y - 12 - camJ, pw ? '#40F060' : '#305038', 1, false);
     wr('#222834', x - 2, y - 2, 36, 18);
@@ -1311,8 +1574,17 @@ function drawExit() {
     wr('#1A1410', x, y - 2, 32, 18);
     if (pw) { wr('#E8D890', x + 2, y, 28, 16); wr('#8A7A4A', x, y, 3, 16); wr('#8A7A4A', x + 29, y, 3, 16); }
     else for (let i = 0; i < 8; i++) wr('#8A7A4A', x + 1 + i * 4, y, 2, 16);
-    wr(pw ? '#40F060' : '#D82800', x + 14, y - 12, 4, 4);
+    exitLamp(x + 14, y - 12, 4, pw);
   }
+}
+
+function drawFrag() {
+  if (!frag || frag.got) return;
+  const sx = frag.x - camI, sy = frag.y - camJ;
+  if (sx < -10 || sx > W + 10 || sy < -10 || sy > H + 10) return;
+  wr('#000', frag.x - 4, frag.y - 6, 9, 12); wr('#D8C8F0', frag.x - 3, frag.y - 5, 7, 10);
+  wr('#6B4E8A', frag.x - 2, frag.y - 3, 5, 1); wr('#6B4E8A', frag.x - 2, frag.y - 1, 5, 1); wr('#6B4E8A', frag.x - 2, frag.y + 1, 3, 1);
+  if (Math.floor(frame / 12) % 2) wr('#FCFCFC', frag.x + 3, frag.y - 6, 1, 1);
 }
 
 function drawPickups() {
@@ -1389,7 +1661,7 @@ function drawTiles() {
 }
 
 function drawWorld() {
-  const sh = shake > 0 ? [rnd(5) - 2, rnd(5) - 2] : [0, 0];
+  const sh = shake > 0 && !reduceFx ? [rnd(5) - 2, rnd(5) - 2] : [0, 0];
   camI = Math.round(camX) + sh[0]; camJ = Math.round(camY) + sh[1];
   rect('#000', 0, 0, W, H);
   drawTiles();
@@ -1402,6 +1674,7 @@ function drawWorld() {
   drawExit();
   drawLightSprites();
   drawPickups();
+  drawFrag();
   // vilões e jogador, ordenados por profundidade (y)
   const ents = [{ y: P.y, draw: () => {
     if (P.dead) { wr('#FCFCFC', P.x - 6, P.y - 3, 12, 4); wr('#FCB800', P.x - 5, P.y - 3, 7, 3); return; }
@@ -1429,6 +1702,7 @@ function lightFactor(l) {
     case 'wall': return l.ph > 4.5 && Math.floor(frame / 6 + l.ph * 7) % 11 === 0 ? 0.3 : 1;
     case 'emerg': return Math.floor(frame / 30 + l.ph) % 2 ? 0.25 : 1;
     case 'wisp': return 0.8 + 0.2 * Math.sin(frame * 0.06 + l.ph);
+    case 'frag': return 0.75 + 0.25 * Math.sin(frame * 0.07 + l.ph);
     default: return 1;
   }
 }
@@ -1487,6 +1761,7 @@ function drawDarkness() {
   const M = MODES[mode];
   const lights = [];
   for (const l of mapLights) {
+    if (l.kind === 'frag' && (!frag || frag.got)) continue;
     const [lx, ly] = lightPos(l), r = l.r * M.ls * lightFactor(l), sx = lx - camI, sy = ly - camJ;
     if (sx < -r || sx > W + r || sy < -r || sy > H + r) continue;
     lights.push([sx, sy, r]);
@@ -1521,7 +1796,7 @@ function drawDarkness() {
   for (let lv = 0; lv < 4; lv++) {
     const b = buckets[lv];
     if (!b.length) continue;
-    ctx.fillStyle = 'rgba(2,4,16,' + M.alpha[lv] + ')';
+    ctx.fillStyle = 'rgba(2,4,16,' + (M.alpha[lv] * BRIGHT[bright].k).toFixed(3) + ')';
     ctx.beginPath();
     for (let i = 0; i < b.length; i += 2) ctx.rect(b[i], b[i + 1], CELL, CELL);
     ctx.fill();
@@ -1536,7 +1811,7 @@ function drawDarkness() {
 
 function drawStatic() {
   if (fear < 0.45) return;
-  const n = Math.floor((fear - 0.4) * 60);
+  const n = reduceFx ? 0 : Math.floor((fear - 0.4) * 60);
   for (let i = 0; i < n; i++) rect(Math.random() < 0.5 ? '#FCFCFC' : '#404050', rnd(W), rnd(H), 1 + rnd(2), 1);
   ctx.fillStyle = 'rgba(160,0,0,' + ((fear - 0.45) * 0.5).toFixed(2) + ')';
   ctx.fillRect(0, 0, W, 4); ctx.fillRect(0, H - 4, W, 4); ctx.fillRect(0, 0, 4, H); ctx.fillRect(W - 4, 0, 4, H);
@@ -1573,14 +1848,47 @@ function drawLightButton() {
   drawText(on ? 'LIGADA' : 'APAGADA', b.x + (on ? 10 : 7), b.y + 12, on ? '#802000' : '#FC7460', 1, false);
 }
 
+/** Seta na borda da tela: aponta o gerador (quando se carrega fusível) ou a saída (quando há energia). */
+function drawGuide() {
+  let tx, ty, col, label;
+  if (powered) { tx = EXIT.x + EXIT.w / 2; ty = EXIT.y + EXIT.h / 2; col = '#40F060'; label = 'SAIDA'; }
+  else if (fusesHeld > 0) { tx = GEN.x; ty = GEN.y; col = '#FCB800'; label = 'GERADOR'; }
+  else return;
+  const sx = tx - camI, sy = ty - camJ;
+  if (sx > 14 && sx < W - 14 && sy > 32 && sy < H - 40) return;            // já está à vista
+  const cx = W / 2, cy = H / 2 + 4, dx = sx - cx, dy = sy - cy, m = Math.hypot(dx, dy) || 1;
+  const k = Math.min((W / 2 - 14) / Math.max(1e-3, Math.abs(dx)), (H / 2 - 50) / Math.max(1e-3, Math.abs(dy)));
+  const ax = cx + dx * k, ay = cy + dy * k, ux = dx / m, uy = dy / m, px = -uy, py = ux;
+  const tri = (sc, c) => {
+    ctx.fillStyle = c; ctx.beginPath();
+    ctx.moveTo(ax + ux * 7 * sc, ay + uy * 7 * sc);
+    ctx.lineTo(ax - ux * 4 * sc + px * 6 * sc, ay - uy * 4 * sc + py * 6 * sc);
+    ctx.lineTo(ax - ux * 4 * sc - px * 6 * sc, ay - uy * 4 * sc - py * 6 * sc);
+    ctx.closePath(); ctx.fill();
+  };
+  tri(1.4, '#000'); tri(Math.floor(frame / 15) % 2 ? 1 : 0.85, col);
+  const lw = label.length * 6;
+  drawText(label, clamp(Math.round(ax - lw / 2), 2, W - lw - 2), Math.round(ay + (ay < H / 2 ? 11 : -18)), col);
+}
+
 function drawPrompts() {
+  drawVision();
+  // Indicadores ocultistas compactos, mantendo a HUD original.
+  ctx.fillStyle = 'rgba(0,0,0,0.72)'; ctx.fillRect(4, 28, 88, 16);
+  drawText('SIG ' + sigils + ' G' + occultRank + ' SABER', 7, 31, '#C9A7E8');
+  if (grimNew && Math.floor(frame / 30) % 2 === 0) drawText(TOUCH ? 'LIVRO!' : 'G: LIVRO!', 96, 31, '#FCB800');
+  const saberProgress = occultRank >= 3 ? 1 : occultRank === 2 ? (occultXP - 70) / 110 : occultXP / 70;
+  rect('#24202B', 7, 40, 78, 2); rect('#9B70C9', 7, 40, Math.round(78 * clamp(saberProgress, 0, 1)), 2);
+  if (ritualFlash > 0) { ctx.strokeStyle = 'rgba(190,150,230,' + (ritualFlash / 24) + ')'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(128, 120, 22 + (18-ritualFlash), 0, Math.PI*2); ctx.stroke(); }
   if (P.dead) return;
+  drawGuide();
   const sx = Math.round(P.x) - camI, sy = Math.round(P.y) - camJ;
   if (P.act) {
     const gen = P.act.kind === 'gen', need = gen ? 45 : 80;
     if (P.prog > 0) { rect('#000', sx - 13, sy - 28, 26, 6); rect('#FCB800', sx - 12, sy - 27, Math.round(24 * P.prog / need), 4); }
     else if (Math.floor(frame / 30) % 2 === 0) drawTextC(gen ? 'SEGURE Z: USAR GERADOR' : 'SEGURE Z: PROCURAR', 186, '#FCFCFC');
   }
+  if (sigils > 0 && Math.floor(frame / 30) % 2 === 0) drawTextC('C: SELO' + (occultRank >= 2 ? '  V: VISAO' : '') + '  (' + sigils + ')', 222, '#C9A7E8');
   if (P.hidden) drawText('ESCONDIDO', sx - 27, sy - 24, '#80D010');
   if (messages.length) { ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 196, W, 14); drawTextC(messages[0].text, 200, '#FCFCFC'); }
 }
@@ -1621,8 +1929,12 @@ function drawTitle() {
   if (M.mult > 1) drawTextC('PONTOS X' + M.mult, 152, '#B0B0B8');
   for (let i = 0; i < MODES.length; i++) rect(i === mode ? '#FCFCFC' : '#505058', W / 2 - 10 + i * 8, 162, 4, 4);
   if (Math.floor(frame / 30) % 2 === 0) drawTextC('PRESSIONE ENTER', 172, '#FCFCFC', 2);
-  drawTextC('CIMA/BAIXO = MODO', 200, '#B0B0B8');
-  drawTextC('RECORDE ' + String(hiScore).padStart(6, '0'), 222, '#FCB800');
+  drawTextC('CIMA/BAIXO = MODO', 188, '#B0B0B8');
+  const opt = (label, y, key) => { const t = label + (TOUCH ? '' : ' (' + key + ')'); if (TOUCH) rect('#1C1C2C', Math.round((W - t.length * 6) / 2) - 4, y - 2, t.length * 6 + 7, 11); drawTextC(t, y, '#C9A7E8'); };
+  opt('EFEITOS: ' + (reduceFx ? 'REDUZIDOS' : 'NORMAIS'), 200, 'E');
+  opt('BRILHO: ' + BRIGHT[bright].name, 211, 'B');
+  opt('GRIMORIO: ' + codex.size + '/' + CODEX.length + ' SABER  ' + frags.size + '/5 FRAG', 224, 'G');
+  drawTextC('RECORDE ' + String(hiScore).padStart(6, '0'), 3, '#FCB800');
 }
 
 function drawIntro() {
@@ -1632,10 +1944,19 @@ function drawIntro() {
   drawStars(W / 2, 62, LV.stars);
   drawTextC('DIFICULDADE: ' + LV.diff, 76, '#B0B0B8');
   drawTextC('MODO: ' + MODES[mode].name, 88, '#FCB800');
-  const lines = ['ACHE ' + LV.fuses + ' FUSIVEIS,', 'LIGUE O GERADOR E', LV.way + '.', '', LV.killers > 1 ? 'DOIS CEIFADORES PATRULHAM!' : 'O CEIFADOR PATRULHA.', 'ELE OUVE VOCE CORRENDO.', '', LV.tip];
-  const shown = Math.floor(introT / 2);
+  const ctl = TOUCH ? ['JOYSTICK MOVE   A = AGIR   B = CORRER', 'LANTERNA  C = SELO  V = VISAO']
+                    : ['SETAS/WASD MOVE   Z = AGIR   X = CORRE', 'F = LANTERNA  G = GRIMORIO  P = PAUSA'];
+  const W0 = '#FCFCFC', G0 = '#B0B0B8';
+  const lines = [
+    { t: 'ACHE ' + LV.fuses + ' FUSIVEIS E LIGUE O GERADOR,', c: W0 }, { t: LV.way + '.', c: W0 },
+    { t: LV.killers > 1 ? 'DOIS CEIFADORES PATRULHAM!' : 'O CEIFADOR PATRULHA.', c: W0 }, { t: 'ELE OUVE VOCE CORRENDO.', c: W0 },
+    { t: LV.tip, c: '#FCB800' }, { t: '', c: W0 },
+    { t: ctl[0], c: G0 }, { t: ctl[1], c: G0 },
+    { t: 'SIGILOS: C = SELO, V = VISAO (GRAU 2).', c: '#C9A7E8' }
+  ];
+  const shown = Math.floor(introT / 1.5);
   let n = 0;
-  lines.forEach((l, i) => { const part = l.slice(0, Math.max(0, shown - n)); n += l.length + 1; drawTextC(part, 104 + i * 12, i === lines.length - 1 ? '#FCB800' : '#FCFCFC', 1); });
+  lines.forEach((l, i) => { const part = l.t.slice(0, Math.max(0, shown - n)); n += l.t.length + 1; drawTextC(part, 100 + i * 11, l.c, 1); });
   if (introT > 40 && Math.floor(frame / 30) % 2 === 0) drawTextC('ENTER = COMECAR', 218, '#FCB800');
 }
 
@@ -1652,7 +1973,8 @@ function drawLevelUp() {
   drawText('MODO ' + MODES[mode].name, 48, 114, '#B0B0B8'); drawTextR('X' + MODES[mode].mult, 208, 114, '#FCFCFC');
   rect('#B0B0B8', 48, 128, 160, 1);
   drawText('TOTAL', 48, 136, '#FCB800'); drawTextR(String(score), 208, 136, '#FCB800');
-  drawTextC('PROXIMA: ' + LEVELS[level + 1].name, 160, '#B0B0B8');
+  drawTextC('SABER OCULTO: ' + occultXP + ' XP  GRAU ' + occultRank, 150, '#C9A7E8');
+  drawTextC('PROXIMA: ' + LEVELS[level + 1].name, 164, '#B0B0B8');
   drawTextC('DIFICULDADE: ' + LEVELS[level + 1].diff, 172, '#D82800');
   if (lockT > 60 && Math.floor(frame / 30) % 2 === 0) drawTextC('ENTER = CONTINUAR', 210, '#FCB800');
 }
@@ -1677,12 +1999,13 @@ function drawWin() {
   rect('#000', 108, 130, 40, 20); rect('#7C4C20', 110, 132, 36, 16); rect('#A8682C', 110, 132, 36, 3);
   rect('#FCD060', 114, 138, 4, 4); rect('#FCD060', 138, 138, 4, 4);
   camI = camJ = 0; drawCounselor(128, 142, 0, false, 0);
-  panel(24, 22, 208, 86);
+  panel(24, 22, 208, 98);
   drawTextC('VOCE SOBREVIVEU!', 32, '#40F060', 2);
   drawTextC('AS 5 NOITES TERMINARAM.', 54, '#FCFCFC');
   drawTextC('O AMANHECER CHEGA... MAS SERA', 66, '#B0B0B8');
   drawTextC('QUE ELE REALMENTE FICOU PARA TRAS?', 78, '#B0B0B8');
-  drawTextC('PONTOS ' + String(score).padStart(6, '0') + '  RECORDE ' + String(hiScore).padStart(6, '0'), 94, '#FCB800');
+  drawTextC(frags.size >= 5 ? 'VOCE SABE O QUE O LAGO REFLETE.' : 'OS SIGILOS AINDA PULSAM NA AGUA.', 92, '#C9A7E8');
+  drawTextC('PONTOS ' + String(score).padStart(6, '0') + '  RECORDE ' + String(hiScore).padStart(6, '0'), 104, '#FCB800');
   if (lockT > 90 && Math.floor(frame / 30) % 2 === 0) drawTextC('ENTER = VOLTAR AO TITULO', 200, '#FCB800');
 }
 
@@ -1693,7 +2016,7 @@ function render() {
     case 'intro': drawIntro(); break;
     case 'play':
       drawWorld(); drawDarkness(); drawStatic(); drawHUD(); drawPrompts(); if (TOUCH) syncTouch(); else drawLightButton();
-      if (flash > 0) { ctx.fillStyle = flashCol; ctx.globalAlpha = Math.min(0.7, flash / 16); ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
+      if (flash > 0) { ctx.fillStyle = flashCol; ctx.globalAlpha = Math.min(reduceFx ? 0.15 : 0.7, flash / 16); ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
       if (P.dead) { ctx.fillStyle = 'rgba(0,0,0,' + Math.min(0.9, endT / 100) + ')'; ctx.fillRect(0, 0, W, H); }
       if (paused) { panel(88, 100, 80, 32); drawTextC('PAUSA', 111, '#FCFCFC', 2); }
       break;
@@ -1702,6 +2025,7 @@ function render() {
     case 'win': drawWin(); break;
     default: break;
   }
+  if (grim) drawGrimoire();
 }
 
 
@@ -1719,13 +2043,13 @@ requestAnimationFrame(loop);
 // Hook usado apenas por testes automatizados
 window.__game = {
   update, render, keys, P, onAction, getState: () => state,
-  start(l) { score = 0; level = l; P.hp = START_HP; beginLevel(); },
+  start(l) { score = 0; level = l; P.hp = START_HP; occultXP = 0; occultRank = 1; sigils = 1; beginLevel(); },
   get killers() { return killers; }, get structs() { return structs; }, get pickups() { return pickups; },
   get grid() { return grid; }, get EXIT() { return EXIT; }, get GEN() { return GEN; }, get LV() { return LV; },
   get level() { return level; }, set fusesHeld(n) { fusesHeld = n; }, get fusesIn() { return fusesIn; },
-  get powered() { return powered; }, get walkList() { return walkList; }, get bushes() { return bushes; }, get score() { return score; },
+  get powered() { return powered; }, get occultXP() { return occultXP; }, get occultRank() { return occultRank; }, get sigils() { return sigils; }, castRitual, castVision, get visionT() { return visionT; }, set sigils(n) { sigils = n; }, set occultXP(n) { occultXP = n; occultRank = rankFor(n); }, get walkList() { return walkList; }, get bushes() { return bushes; }, get score() { return score; },
   get unlocked() { return unlocked; }, set unlocked(n) { unlocked = n; },
-  enableTouch, menuNav, get TOUCH() { return TOUCH; }, get mode() { return mode; }, set mode(m) { mode = m; }, get lights() { return mapLights; }, setState(x) { state = x; }
+  enableTouch, menuNav, openGrim, closeGrim, discover, grimLines, get grim() { return grim; }, get codex() { return codex; }, get frags() { return frags; }, get frag() { return frag; }, CODEX, toggleFx, toggleBright, get reduceFx() { return reduceFx; }, get bright() { return bright; }, get messages() { return messages; }, msg, set fusesHeldN(n) { fusesHeld = n; }, set powered(v) { powered = v; }, get TOUCH() { return TOUCH; }, get mode() { return mode; }, set mode(m) { mode = m; }, get lights() { return mapLights; }, setState(x) { state = x; }
 };
 
 })();
